@@ -1,0 +1,14 @@
+# Telegram-бот и фреймворк
+aiogram>=3.13,<4.0
+
+# Работа с базой данных (ORM + асинхронные драйверы)
+SQLAlchemy>=2.0,<3.0
+aiosqlite>=0.20          # локальная разработка (SQLite)
+asyncpg>=0.29            # прод на Railway (PostgreSQL)
+greenlet>=3.0
+
+# Конфигурация из .env
+pydantic-settings>=2.4
+
+# Планировщик уведомлений (утренний лимит, вечерняя сводка)
+APScheduler>=3.10,<4.0
