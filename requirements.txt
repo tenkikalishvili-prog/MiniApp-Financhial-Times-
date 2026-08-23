@@ -12,3 +12,7 @@ pydantic-settings>=2.4
 
 # Планировщик уведомлений (утренний лимит, вечерняя сводка)
 APScheduler>=3.10,<4.0
+
+# HTTP-API для Mini App (фронт React)
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30
