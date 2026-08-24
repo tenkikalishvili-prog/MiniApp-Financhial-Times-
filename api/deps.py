@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Annotated, AsyncIterator, Optional
 
 from fastapi import Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger("api.auth")
 
 from backend.config import settings
 from backend.db import async_session
@@ -34,10 +37,15 @@ async def get_current_user(
     """
     tg: Optional[TelegramUser] = None
 
+    # Диагностика: длина пришедшего initData (не сам контент — он подписан, но
+    # содержит user). Помогает понять, шлёт ли Mini App заголовок вообще.
+    logger.info("auth: initData header len=%s", len(x_telegram_init_data or ""))
+
     if x_telegram_init_data:
         try:
             tg = validate_init_data(x_telegram_init_data, settings.bot_token)
         except InitDataError as exc:
+            logger.warning("auth: initData rejected: %s", exc)
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=f"invalid init data: {exc}",
@@ -47,6 +55,7 @@ async def get_current_user(
         if settings.api_dev_user_id is not None:
             tg = TelegramUser(telegram_id=settings.api_dev_user_id, name="Dev")
         else:
+            logger.warning("auth: no initData header → 401")
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="no Telegram init data",
