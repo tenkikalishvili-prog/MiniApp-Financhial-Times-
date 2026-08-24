@@ -39,21 +39,38 @@ def validate_init_data(
     if not received_hash:
         raise InitDataError("no hash")
 
-    # Telegram (с 2024) добавляет поле `signature` (Ed25519-подпись для сторонней
-    # валидации). В строку проверки HMAC-хэша оно НЕ входит — исключаем, иначе
-    # подпись не сойдётся. См. спецификацию validating-data-received.
-    pairs.pop("signature", None)
+    # Токен из окружения может прийти с хвостовым пробелом/переносом — это ломает
+    # HMAC, хотя вызовы Bot API ещё проходят. Подчищаем.
+    secret_key = hmac.new(
+        b"WebAppData", bot_token.strip().encode(), hashlib.sha256
+    ).digest()
 
-    # Строка проверки: пары key=value, отсортированные по ключу, через \n
-    data_check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
+    # Telegram с 2024 добавляет поле `signature` (Ed25519 для сторонней валидации).
+    # Разные версии клиента считают HMAC-хэш то БЕЗ него, то ВКЛЮЧАЯ его в строку.
+    # Чтобы быть устойчивыми, пробуем оба варианта и принимаем любой совпавший.
+    signature = pairs.pop("signature", None)
 
-    secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
-    calc_hash = hmac.new(
-        secret_key, data_check_string.encode(), hashlib.sha256
-    ).hexdigest()
+    variants = [dict(pairs)]  # без signature
+    if signature is not None:
+        with_sig = dict(pairs)
+        with_sig["signature"] = signature
+        variants.append(with_sig)  # с signature
 
-    if not hmac.compare_digest(calc_hash, received_hash):
-        raise InitDataError("bad signature")
+    matched = False
+    for cand in variants:
+        data_check_string = "\n".join(f"{k}={cand[k]}" for k in sorted(cand))
+        calc_hash = hmac.new(
+            secret_key, data_check_string.encode(), hashlib.sha256
+        ).hexdigest()
+        if hmac.compare_digest(calc_hash, received_hash):
+            matched = True
+            break
+
+    if not matched:
+        raise InitDataError(
+            f"bad signature (token_len={len(bot_token.strip())}, "
+            f"has_signature={signature is not None}, keys={sorted(pairs)})"
+        )
 
     # Защита от переигрывания старых данных
     auth_date = int(pairs.get("auth_date", "0"))
