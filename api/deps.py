@@ -37,10 +37,6 @@ async def get_current_user(
     """
     tg: Optional[TelegramUser] = None
 
-    # Диагностика: длина пришедшего initData (не сам контент — он подписан, но
-    # содержит user). Помогает понять, шлёт ли Mini App заголовок вообще.
-    logger.info("auth: initData header len=%s", len(x_telegram_init_data or ""))
-
     if x_telegram_init_data:
         try:
             tg = validate_init_data(x_telegram_init_data, settings.bot_token)
