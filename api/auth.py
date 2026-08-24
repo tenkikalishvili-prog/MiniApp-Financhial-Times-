@@ -39,6 +39,11 @@ def validate_init_data(
     if not received_hash:
         raise InitDataError("no hash")
 
+    # Telegram (с 2024) добавляет поле `signature` (Ed25519-подпись для сторонней
+    # валидации). В строку проверки HMAC-хэша оно НЕ входит — исключаем, иначе
+    # подпись не сойдётся. См. спецификацию validating-data-received.
+    pairs.pop("signature", None)
+
     # Строка проверки: пары key=value, отсортированные по ключу, через \n
     data_check_string = "\n".join(f"{k}={pairs[k]}" for k in sorted(pairs))
 
