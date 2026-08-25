@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # этот telegram_id. В проде оставить пустым (None) — тогда только initData.
     api_dev_user_id: Optional[int] = None
 
+    # Владелец продукта. Его данные (личный бюджет из старого seed) НЕ трогаем
+    # при сбросе пользователей до нейтральной «коробки» (devtools.py reset-box).
+    owner_telegram_id: Optional[int] = 344273869
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
