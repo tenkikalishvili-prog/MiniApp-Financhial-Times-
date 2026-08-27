@@ -47,8 +47,48 @@ async_session = async_sessionmaker(engine, expire_on_commit=False, class_=AsyncS
 
 
 async def init_db() -> None:
-    """Создаёт таблицы, если их ещё нет (первый запуск)."""
+    """Создаёт таблицы, если их ещё нет, и добивает недостающие столбцы (лёгкая миграция)."""
     from backend import models  # noqa: F401  (регистрируем модели в метаданных)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_ensure_user_columns)
+
+
+def _ensure_user_columns(conn) -> None:
+    """Идемпотентно добавляет новые столбцы в ``users`` (create_all их не добавляет).
+
+    Работает и для SQLite (локально), и для Postgres (прод). При первом добавлении
+    ``onboarded_at`` разово помечает всех существующих пользователей пройденными —
+    чтобы владелец и уже заведённые люди НЕ попадали на мастер онбординга; он нужен
+    только новичкам, созданным после этого деплоя.
+    """
+    from sqlalchemy import inspect, text
+
+    is_pg = conn.dialect.name == "postgresql"
+    dt_type = "TIMESTAMP" if is_pg else "DATETIME"
+
+    existing = {col["name"] for col in inspect(conn).get_columns("users")}
+    to_add = {
+        "onboarded_at": dt_type,
+        "monthly_income": "NUMERIC(12, 2)",
+        "discretionary_budget": "NUMERIC(12, 2)",
+    }
+
+    onboarded_was_missing = "onboarded_at" not in existing
+    for name, sql_type in to_add.items():
+        if name in existing:
+            continue
+        # На Postgres бот и API стартуют на одной БД одновременно — используем
+        # IF NOT EXISTS, чтобы параллельный ALTER не падал с «column already exists».
+        # SQLite (локально, один процесс) IF NOT EXISTS не поддерживает — там хватает
+        # проверки по inspect выше.
+        guard = "IF NOT EXISTS " if is_pg else ""
+        conn.execute(text(f"ALTER TABLE users ADD COLUMN {guard}{name} {sql_type}"))
+
+    # Разовый бэкфилл: существующие пользователи считаются онбординг-пройденными.
+    # Идемпотентно (WHERE ... IS NULL) — безопасно даже при гонке бота и API.
+    if onboarded_was_missing:
+        conn.execute(
+            text("UPDATE users SET onboarded_at = CURRENT_TIMESTAMP WHERE onboarded_at IS NULL")
+        )

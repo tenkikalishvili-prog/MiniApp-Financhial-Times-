@@ -23,6 +23,15 @@ class MeOut(CamelModel):
     name: str
     currency: str
     theme: str
+    needs_onboarding: bool = Field(serialization_alias="needsOnboarding")
+    planned_income: Optional[float] = Field(default=None, serialization_alias="plannedIncome")
+    planned_spending: Optional[float] = Field(default=None, serialization_alias="plannedSpending")
+
+
+# ── Онбординг (лёгкий мастер: доход + общий лимит трат) ───────────────────
+class OnboardingIn(CamelModel):
+    monthly_income: Optional[float] = Field(default=None, validation_alias="monthlyIncome")
+    monthly_spending: Optional[float] = Field(default=None, validation_alias="monthlySpending")
 
 
 # ── Обзор месяца ─────────────────────────────────────────────────────────

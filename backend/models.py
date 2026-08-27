@@ -39,6 +39,15 @@ class User(Base):
     currency: Mapped[str] = mapped_column(String(8), default="RUB")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
+    # ── Онбординг (лёгкий мастер первого входа) ──────────────────────────
+    # NULL → мастер ещё не пройден (показываем при первом входе в Mini App).
+    onboarded_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    # Плановый доход в месяц (с онбординга) — контекст, для будущих целей/сводок.
+    monthly_income: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    # Общий месячный лимит на группу «Траты» (с онбординга). Питает дневной лимит,
+    # пока пользователь не задал лимиты по подкатегориям вручную (тогда берётся их сумма).
+    discretionary_budget: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+
     categories: Mapped[list[Category]] = relationship(back_populates="user")
     transactions: Mapped[list[Transaction]] = relationship(back_populates="user")
 

@@ -10,7 +10,9 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import select
 
 from backend.models import Budget, Category, Transaction
+from backend.models import User
 from backend.services import categories as categories_svc
+from backend.services import onboarding as onboarding_svc
 from backend.services import reports
 from backend.services import transactions as tx_svc
 from backend.services.limits import DISCRETIONARY_GROUP, get_daily_limit
@@ -22,6 +24,7 @@ from .schemas import (
     BudgetSet,
     CategoryGroupOut,
     MeOut,
+    OnboardingIn,
     OverviewOut,
     SliceOut,
     SubcategoryOut,
@@ -63,15 +66,40 @@ def _tx_out(t: Transaction) -> TransactionOut:
 
 
 # ── Пользователь ─────────────────────────────────────────────────────────
-@router.get("/me", response_model=MeOut)
-async def me(user: CurrentUser) -> MeOut:
+def _me_out(user: User) -> MeOut:
     return MeOut(
         id=user.id,
         telegram_id=user.telegram_id,
         name=user.name,
         currency=user.currency,
         theme=user.theme,
+        needs_onboarding=user.onboarded_at is None,
+        planned_income=float(user.monthly_income) if user.monthly_income is not None else None,
+        planned_spending=(
+            float(user.discretionary_budget) if user.discretionary_budget is not None else None
+        ),
     )
+
+
+@router.get("/me", response_model=MeOut)
+async def me(user: CurrentUser) -> MeOut:
+    return _me_out(user)
+
+
+@router.post("/onboarding", response_model=MeOut)
+async def submit_onboarding(
+    body: OnboardingIn,
+    user: CurrentUser,
+    session: SessionDep,
+) -> MeOut:
+    """Лёгкий мастер первого входа: сохраняет доход и общий лимит трат."""
+    updated = await onboarding_svc.complete_onboarding(
+        session,
+        user,
+        monthly_income=body.monthly_income,
+        monthly_spending=body.monthly_spending,
+    )
+    return _me_out(updated)
 
 
 # ── Обзор месяца (Главная) ───────────────────────────────────────────────

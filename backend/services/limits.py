@@ -15,7 +15,7 @@ from decimal import Decimal
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import Budget, Category, Transaction
+from backend.models import Budget, Category, Transaction, User
 
 DISCRETIONARY_GROUP = "Траты"
 # Порог «жёлтой зоны»: до 1.5× дневного ориентира — средне, выше — перерасход.
@@ -80,6 +80,24 @@ async def _sum_budget(
     return Decimal(str(result))
 
 
+async def _discretionary_budget(
+    session: AsyncSession, user_id: int, category_ids: list[int]
+) -> Decimal:
+    """Месячный бюджет группы «Траты».
+
+    Приоритет — сумма лимитов по подкатегориям (если пользователь задал их вручную
+    в приложении). Если их нет (человек прошёл только лёгкий онбординг) — берём общий
+    лимит трат с онбординга (``User.discretionary_budget``).
+    """
+    sub_sum = await _sum_budget(session, user_id, category_ids)
+    if sub_sum > 0:
+        return sub_sum
+    user = await session.get(User, user_id)
+    if user is not None and user.discretionary_budget:
+        return Decimal(str(user.discretionary_budget))
+    return Decimal("0")
+
+
 async def _sum_spent(
     session: AsyncSession,
     user_id: int,
@@ -108,7 +126,7 @@ async def get_daily_limit(
     ids = await _discretionary_ids(session, user_id)
     month_start, next_month, days_in_month = _month_bounds(on_date)
 
-    monthly_budget = await _sum_budget(session, user_id, ids)
+    monthly_budget = await _discretionary_budget(session, user_id, ids)
     spent_month = await _sum_spent(session, user_id, ids, month_start, next_month)
     remaining = monthly_budget - spent_month
     days_left = days_in_month - on_date.day + 1  # включая сегодня
@@ -124,7 +142,7 @@ async def get_daily_limit(
         remaining=remaining,
         days_left=days_left,
         per_day=per_day,
-        has_budget=bool(ids) and monthly_budget > 0,
+        has_budget=monthly_budget > 0,
     )
 
 
@@ -136,7 +154,7 @@ async def get_evening_summary(
     ids = await _discretionary_ids(session, user_id)
     month_start, next_month, days_in_month = _month_bounds(on_date)
 
-    monthly_budget = await _sum_budget(session, user_id, ids)
+    monthly_budget = await _discretionary_budget(session, user_id, ids)
     spent_month = await _sum_spent(session, user_id, ids, month_start, next_month)
     today_spent = await _sum_spent(
         session, user_id, ids, on_date, on_date + timedelta(days=1)
@@ -160,5 +178,5 @@ async def get_evening_summary(
         status=status,
         spent_month=spent_month,
         monthly_budget=monthly_budget,
-        has_budget=bool(ids) and monthly_budget > 0,
+        has_budget=monthly_budget > 0,
     )
