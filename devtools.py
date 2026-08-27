@@ -5,6 +5,7 @@
     python devtools.py clear-tx    # удалить ВСЕ операции (категории и бюджеты остаются)
     python devtools.py reset        # полный сброс: удалить операции, категории, пользователей
     python devtools.py reset-box    # сбросить ВСЕХ, кроме владельца, до нейтральной «коробки»
+    python devtools.py reset-onboarding <telegram_id>  # снова показать мастер онбординга юзеру
 
 Совет: перед clear-tx / reset / reset-box лучше остановить бота (Ctrl+C), чтобы файл не был занят.
 """
@@ -110,6 +111,27 @@ async def reset_box() -> None:
     print(f"✅ Готово. Сброшено пользователей: {len(targets)}. Данные владельца сохранены.")
 
 
+async def reset_onboarding(telegram_id: int) -> None:
+    """Сбрасывает флаг онбординга одному пользователю → при следующем входе снова мастер.
+
+    Очищает onboarded_at + плановые доход/лимит трат. Категории, бюджеты и операции
+    НЕ трогаем. Полезно, чтобы самому пройти мастер первого входа (напр. на тест-аккаунте).
+    """
+    async with async_session() as session:
+        user = (await session.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )).scalar_one_or_none()
+        if user is None:
+            print(f"⛔ Пользователь с telegram_id={telegram_id} не найден.")
+            return
+        user.onboarded_at = None
+        user.monthly_income = None
+        user.discretionary_budget = None
+        await session.commit()
+    who = user.name or f"user {user.id}"
+    print(f"✅ [{who}] tg={telegram_id}: онбординг сброшен — при следующем входе покажется мастер.")
+
+
 async def main() -> None:
     command = sys.argv[1] if len(sys.argv) > 1 else "show"
     if command == "show":
@@ -120,8 +142,13 @@ async def main() -> None:
         await reset()
     elif command == "reset-box":
         await reset_box()
+    elif command == "reset-onboarding":
+        if len(sys.argv) < 3:
+            print("Использование: python devtools.py reset-onboarding <telegram_id>")
+            return
+        await reset_onboarding(int(sys.argv[2]))
     else:
-        print("Команды: show | clear-tx | reset | reset-box")
+        print("Команды: show | clear-tx | reset | reset-box | reset-onboarding <telegram_id>")
 
 
 if __name__ == "__main__":
