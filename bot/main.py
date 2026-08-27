@@ -17,7 +17,7 @@ from aiogram.types import BotCommand
 
 from backend.config import settings
 from backend.db import init_db
-from bot.handlers import add_transaction, notifications, start
+from bot.handlers import add_transaction, admin, notifications, start
 from bot.scheduler import EVENING_HOUR, MORNING_HOUR, TIMEZONE, setup_scheduler
 
 
@@ -44,6 +44,7 @@ async def main() -> None:
     )
     dp = Dispatcher(storage=MemoryStorage())
     dp.include_router(start.router)
+    dp.include_router(admin.router)  # скрытые команды владельца (/reset_onboarding) — до мастера
     dp.include_router(notifications.router)  # команды /limit, /day — до мастера ввода
     dp.include_router(add_transaction.router)
 
