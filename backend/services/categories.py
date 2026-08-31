@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Category
@@ -77,3 +77,44 @@ async def rename_subcategory(
     await session.commit()
     await session.refresh(category)
     return category
+
+
+async def rename_group(
+    session: AsyncSession, user_id: int, article: str, old_group: str, new_group: str
+) -> int:
+    """Переименовывает КАТЕГОРИЮ (группу) — меняет ``group`` у всех её подкатегорий.
+
+    Категория не отдельная таблица, а поле ``group`` в строках подкатегорий, поэтому
+    переименование = массовый UPDATE. Имя не пустое; слияние с уже существующей группой
+    запрещено (иначе конфликт уникальности и перемешивание). Возвращает число обновлённых
+    подкатегорий. id подкатегорий не меняются — история и бюджеты сохраняются.
+    """
+    name = new_group.strip()
+    if not name:
+        raise ValueError("empty name")
+    if name == old_group:
+        return 0
+
+    clash = await session.scalar(
+        select(Category.id)
+        .where(
+            Category.user_id == user_id,
+            Category.article == article,
+            Category.group == name,
+        )
+        .limit(1)
+    )
+    if clash is not None:
+        raise ValueError("group exists")
+
+    result = await session.execute(
+        update(Category)
+        .where(
+            Category.user_id == user_id,
+            Category.article == article,
+            Category.group == old_group,
+        )
+        .values(group=name)
+    )
+    await session.commit()
+    return result.rowcount or 0

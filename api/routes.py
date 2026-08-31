@@ -27,6 +27,8 @@ from .schemas import (
     BudgetSubOut,
     CategoryGroupOut,
     CategoryRename,
+    GroupRename,
+    GroupRenameOut,
     MeOut,
     OnboardingIn,
     OverviewOut,
@@ -322,6 +324,27 @@ async def categories(
             )
         )
     return out
+
+
+@router.patch("/categories/group", response_model=GroupRenameOut)
+async def rename_group(
+    body: GroupRename,
+    user: CurrentUser,
+    session: SessionDep,
+) -> GroupRenameOut:
+    """Переименование категории (группы) — меняет её у всех подкатегорий пользователя."""
+    if body.article not in ("income", "expense", "debt"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad article")
+    try:
+        renamed = await categories_svc.rename_group(
+            session, user.id, body.article, body.old_name, body.new_name
+        )
+    except ValueError as exc:
+        detail = "group exists" if str(exc) == "group exists" else str(exc)
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail) from exc
+    if renamed == 0:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "group not found")
+    return GroupRenameOut(group=body.new_name.strip(), renamed=renamed)
 
 
 @router.patch("/categories/{category_id}", response_model=SubcategoryOut)

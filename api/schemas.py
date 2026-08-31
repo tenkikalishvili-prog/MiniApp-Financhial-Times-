@@ -115,6 +115,18 @@ class CategoryRename(CamelModel):
     name: str
 
 
+# ── Переименование категории (группы) ─────────────────────────────────────
+class GroupRename(CamelModel):
+    old_name: str = Field(validation_alias="oldName")
+    new_name: str = Field(validation_alias="newName")
+    article: str = "expense"
+
+
+class GroupRenameOut(CamelModel):
+    group: str
+    renamed: int
+
+
 # ── Категории (для экрана «Добавить») ────────────────────────────────────
 class SubcategoryOut(CamelModel):
     id: int
