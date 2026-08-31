@@ -93,6 +93,28 @@ class BudgetLineOut(CamelModel):
     limit: float
 
 
+# ── Бюджет: полный обзор всех категорий каруселью ─────────────────────────
+class BudgetSubOut(CamelModel):
+    subcategory_id: int = Field(serialization_alias="subcategoryId")
+    name: str
+    emoji: Optional[str]
+    spent: float
+    limit: float
+
+
+class BudgetGroupViewOut(CamelModel):
+    group: str
+    emoji: Optional[str]
+    spent: float
+    limit: float
+    subcategories: list[BudgetSubOut]
+
+
+# ── Переименование подкатегории ───────────────────────────────────────────
+class CategoryRename(CamelModel):
+    name: str
+
+
 # ── Категории (для экрана «Добавить») ────────────────────────────────────
 class SubcategoryOut(CamelModel):
     id: int

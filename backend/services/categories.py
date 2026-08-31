@@ -46,3 +46,34 @@ async def get_subcategories(
 async def get_category(session: AsyncSession, category_id: int) -> Category | None:
     """Одна подкатегория по её id."""
     return await session.get(Category, category_id)
+
+
+async def rename_subcategory(
+    session: AsyncSession, category: Category, new_name: str
+) -> Category:
+    """Переименовывает подкатегорию. Имя не пустое и уникальное в рамках
+    (пользователь, статья, категория) — иначе ``ValueError``.
+
+    Смена только названия: id подкатегории не меняется, поэтому история операций
+    и бюджеты остаются привязанными (в транзакциях хранится category_id).
+    """
+    name = new_name.strip()
+    if not name:
+        raise ValueError("empty name")
+
+    clash = await session.scalar(
+        select(Category.id).where(
+            Category.user_id == category.user_id,
+            Category.article == category.article,
+            Category.group == category.group,
+            Category.name == name,
+            Category.id != category.id,
+        )
+    )
+    if clash is not None:
+        raise ValueError("duplicate name")
+
+    category.name = name
+    await session.commit()
+    await session.refresh(category)
+    return category

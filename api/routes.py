@@ -21,9 +21,12 @@ from backend.services.limits import DISCRETIONARY_GROUP, get_daily_limit
 from .deps import CurrentUser, SessionDep
 from .schemas import (
     AnalyticsOut,
+    BudgetGroupViewOut,
     BudgetLineOut,
     BudgetSet,
+    BudgetSubOut,
     CategoryGroupOut,
+    CategoryRename,
     MeOut,
     OnboardingIn,
     OverviewOut,
@@ -199,6 +202,36 @@ async def analytics(
 
 
 # ── Бюджет ───────────────────────────────────────────────────────────────
+@router.get("/budget/overview", response_model=list[BudgetGroupViewOut])
+async def budget_overview(
+    user: CurrentUser,
+    session: SessionDep,
+    month: Optional[str] = Query(default=None),
+) -> list[BudgetGroupViewOut]:
+    """Полный бюджет каруселью: все расходные категории → все подкатегории (лимит опционален)."""
+    year, mon, _ = _parse_month(month)
+    groups = await reports.budget_overview(session, user.id, year, mon)
+    return [
+        BudgetGroupViewOut(
+            group=g.group,
+            emoji=g.emoji,
+            spent=float(g.spent),
+            limit=float(g.limit),
+            subcategories=[
+                BudgetSubOut(
+                    subcategory_id=s.category_id,
+                    name=s.name,
+                    emoji=s.emoji,
+                    spent=float(s.spent),
+                    limit=float(s.limit),
+                )
+                for s in g.subcategories
+            ],
+        )
+        for g in groups
+    ]
+
+
 @router.get("/budget", response_model=list[BudgetLineOut])
 async def budget(
     user: CurrentUser,
@@ -289,6 +322,24 @@ async def categories(
             )
         )
     return out
+
+
+@router.patch("/categories/{category_id}", response_model=SubcategoryOut)
+async def rename_category(
+    category_id: int,
+    body: CategoryRename,
+    user: CurrentUser,
+    session: SessionDep,
+) -> SubcategoryOut:
+    """Переименование подкатегории (название). id не меняется — история сохраняется."""
+    category = await session.get(Category, category_id)
+    if category is None or category.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "category not found")
+    try:
+        updated = await categories_svc.rename_subcategory(session, category, body.name)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return SubcategoryOut(id=updated.id, name=updated.name, emoji=updated.emoji)
 
 
 # ── Операции ─────────────────────────────────────────────────────────────

@@ -160,6 +160,99 @@ async def budget_lines(
     ]
 
 
+@dataclass
+class BudgetSub:
+    category_id: int
+    name: str
+    emoji: str | None
+    spent: Decimal
+    limit: Decimal
+
+
+@dataclass
+class BudgetGroupView:
+    group: str
+    emoji: str | None
+    spent: Decimal
+    limit: Decimal
+    subcategories: list[BudgetSub]
+
+
+async def budget_overview(
+    session: AsyncSession,
+    user_id: int,
+    year: int,
+    month: int,
+    article: str = "expense",
+) -> list[BudgetGroupView]:
+    """Полный бюджет для экрана «Бюджет»: ВСЕ категории → ВСЕ подкатегории.
+
+    В отличие от ``budget_lines`` (только подкатегории с заданным лимитом, для дневного
+    лимита/overview), здесь показываем и подкатегории без лимита (limit=0) — чтобы можно
+    было листать все категории каруселью и задавать лимиты с нуля. Группировка — в Python
+    с сохранением порядка ``sort_order``.
+    """
+    start, end = month_bounds(year, month)
+
+    spent_subq = (
+        select(
+            Transaction.category_id,
+            func.coalesce(func.sum(Transaction.amount), 0).label("spent"),
+        )
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.date >= start,
+            Transaction.date < end,
+        )
+        .group_by(Transaction.category_id)
+        .subquery()
+    )
+    budget_subq = (
+        select(Budget.category_id, Budget.amount.label("amount"))
+        .where(Budget.user_id == user_id, Budget.period_month.is_(None))
+        .subquery()
+    )
+
+    result = await session.execute(
+        select(
+            Category.id,
+            Category.group,
+            Category.name,
+            Category.emoji,
+            func.coalesce(spent_subq.c.spent, 0),
+            func.coalesce(budget_subq.c.amount, 0),
+        )
+        .outerjoin(spent_subq, spent_subq.c.category_id == Category.id)
+        .outerjoin(budget_subq, budget_subq.c.category_id == Category.id)
+        .where(
+            Category.user_id == user_id,
+            Category.article == article,
+            Category.is_archived == False,  # noqa: E712
+        )
+        .order_by(Category.sort_order)
+    )
+
+    groups: list[BudgetGroupView] = []
+    index: dict[str, BudgetGroupView] = {}
+    for cid, group, name, emoji, spent_raw, limit_raw in result.all():
+        spent = Decimal(str(spent_raw))
+        limit = Decimal(str(limit_raw))
+        view = index.get(group)
+        if view is None:
+            # эмодзи группы — от первой её подкатегории (как на экране «Добавить»)
+            view = BudgetGroupView(
+                group=group, emoji=emoji, spent=Decimal("0"), limit=Decimal("0"), subcategories=[]
+            )
+            index[group] = view
+            groups.append(view)
+        view.subcategories.append(
+            BudgetSub(category_id=cid, name=name, emoji=emoji, spent=spent, limit=limit)
+        )
+        view.spent += spent
+        view.limit += limit
+    return groups
+
+
 async def recent_transactions(
     session: AsyncSession,
     user_id: int,
