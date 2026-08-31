@@ -27,6 +27,9 @@ from .schemas import (
     BudgetSubOut,
     CategoryGroupOut,
     CategoryRename,
+    CreatedSubcategoryOut,
+    DeleteResultOut,
+    GroupDeleteResultOut,
     GroupRename,
     GroupRenameOut,
     MeOut,
@@ -35,6 +38,7 @@ from .schemas import (
     SettingsOut,
     SettingsUpdate,
     SliceOut,
+    SubcategoryCreate,
     SubcategoryOut,
     TopSpendOut,
     TransactionCreate,
@@ -324,6 +328,74 @@ async def categories(
             )
         )
     return out
+
+
+@router.post("/categories", response_model=CreatedSubcategoryOut, status_code=201)
+async def create_category(
+    body: SubcategoryCreate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> CreatedSubcategoryOut:
+    """Создаёт подкатегорию. Если её категории (группы) ещё нет — создаётся и она
+    (передаётся имя новой группы). Так добавляется и новая категория целиком.
+    """
+    if body.article not in ("income", "expense", "debt"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad article")
+    try:
+        created = await categories_svc.create_subcategory(
+            session, user.id, body.article, body.group, body.name, body.emoji
+        )
+    except ValueError as exc:
+        detail = {
+            "empty group": "group name required",
+            "empty name": "name required",
+            "duplicate name": "duplicate name",
+        }.get(str(exc), str(exc))
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, detail) from exc
+    return CreatedSubcategoryOut(
+        id=created.id,
+        name=created.name,
+        emoji=created.emoji,
+        group=created.group,
+        article=created.article,
+    )
+
+
+# DELETE /categories/group объявлен ДО /categories/{category_id}: literal-путь
+# должен перехватить запрос раньше, чем параметрический (иначе "group" → int).
+@router.delete("/categories/group", response_model=GroupDeleteResultOut)
+async def delete_group_route(
+    user: CurrentUser,
+    session: SessionDep,
+    article: str = Query(default="expense"),
+    name: str = Query(..., description="имя категории (группы)"),
+) -> GroupDeleteResultOut:
+    """Удаляет категорию (группу) целиком. Подкатегории без операций удаляются,
+    с историей — архивируются. Служебную группу «Траты» удалять нельзя (по ней
+    считается дневной лимит)."""
+    if article not in ("income", "expense", "debt"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad article")
+    if name.strip() == DISCRETIONARY_GROUP:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "cannot delete service group")
+    try:
+        result = await categories_svc.delete_group(session, user.id, article, name)
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "group not found") from exc
+    return GroupDeleteResultOut(**result)
+
+
+@router.delete("/categories/{category_id}", response_model=DeleteResultOut)
+async def delete_category(
+    category_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> DeleteResultOut:
+    """Удаляет подкатегорию, если по ней нет операций; иначе архивирует (историю храним)."""
+    category = await session.get(Category, category_id)
+    if category is None or category.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "category not found")
+    action = await categories_svc.delete_subcategory(session, category)
+    return DeleteResultOut(action=action, id=category_id)
 
 
 @router.patch("/categories/group", response_model=GroupRenameOut)

@@ -127,6 +127,34 @@ class GroupRenameOut(CamelModel):
     renamed: int
 
 
+# ── Создание подкатегории / категории ────────────────────────────────────
+class SubcategoryCreate(CamelModel):
+    article: str = "expense"
+    group: str
+    name: str
+    emoji: Optional[str] = None
+
+
+class CreatedSubcategoryOut(CamelModel):
+    id: int
+    name: str
+    emoji: Optional[str]
+    group: str
+    article: str
+
+
+# ── Удаление подкатегории / категории ────────────────────────────────────
+class DeleteResultOut(CamelModel):
+    # 'deleted' — удалено физически; 'archived' — скрыто (по подкатегории есть операции)
+    action: str
+    id: int
+
+
+class GroupDeleteResultOut(CamelModel):
+    deleted: int
+    archived: int
+
+
 # ── Категории (для экрана «Добавить») ────────────────────────────────────
 class SubcategoryOut(CamelModel):
     id: int

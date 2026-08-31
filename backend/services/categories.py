@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import Category
+from backend.models import Budget, Category, Transaction
 
 
 async def get_groups(session: AsyncSession, user_id: int, article: str) -> list[str]:
@@ -118,3 +118,138 @@ async def rename_group(
     )
     await session.commit()
     return result.rowcount or 0
+
+
+async def create_subcategory(
+    session: AsyncSession,
+    user_id: int,
+    article: str,
+    group: str,
+    name: str,
+    emoji: str | None = None,
+) -> Category:
+    """Создаёт подкатегорию в категории (группе). Если группы ещё нет — она
+    появляется автоматически (категория = поле ``group``, отдельной таблицы нет),
+    так что этой же функцией создаётся и новая категория (её первая подкатегория).
+
+    Правила: имена не пустые; дубль в рамках (пользователь, статья, категория)
+    запрещён. Если такая подкатегория уже есть, но архивная — «оживляем» её
+    (снимаем архив, при желании обновляем эмодзи), чтобы вернулась история операций.
+    Иначе ``ValueError``. Новая запись встаёт в конец своей категории.
+    """
+    group_name = group.strip()
+    sub_name = name.strip()
+    emoji = (emoji or "").strip() or None
+    if not group_name:
+        raise ValueError("empty group")
+    if not sub_name:
+        raise ValueError("empty name")
+
+    existing = await session.scalar(
+        select(Category).where(
+            Category.user_id == user_id,
+            Category.article == article,
+            Category.group == group_name,
+            Category.name == sub_name,
+        )
+    )
+    if existing is not None:
+        if existing.is_archived:
+            existing.is_archived = False
+            if emoji:
+                existing.emoji = emoji
+            await session.commit()
+            await session.refresh(existing)
+            return existing
+        raise ValueError("duplicate name")
+
+    # Порядок сортировки: в конец группы, если она существует; иначе новая
+    # категория целиком уходит в конец списка статьи.
+    max_in_group = await session.scalar(
+        select(func.max(Category.sort_order)).where(
+            Category.user_id == user_id,
+            Category.article == article,
+            Category.group == group_name,
+        )
+    )
+    if max_in_group is None:
+        max_global = await session.scalar(
+            select(func.max(Category.sort_order)).where(
+                Category.user_id == user_id,
+                Category.article == article,
+            )
+        )
+        next_order = (max_global or 0) + 1
+    else:
+        next_order = max_in_group + 1
+
+    category = Category(
+        user_id=user_id,
+        article=article,
+        group=group_name,
+        name=sub_name,
+        emoji=emoji,
+        sort_order=next_order,
+    )
+    session.add(category)
+    await session.commit()
+    await session.refresh(category)
+    return category
+
+
+async def _has_transactions(session: AsyncSession, category_id: int) -> bool:
+    """Есть ли хоть одна операция по этой подкатегории."""
+    found = await session.scalar(
+        select(Transaction.id).where(Transaction.category_id == category_id).limit(1)
+    )
+    return found is not None
+
+
+async def delete_subcategory(session: AsyncSession, category: Category) -> str:
+    """Удаляет подкатегорию, если по ней НЕТ операций; иначе архивирует.
+
+    История операций ссылается на ``category_id`` (FK), поэтому физически удалять
+    подкатегорию с операциями нельзя — прячем её (``is_archived``), а данные храним.
+    Пустую подкатегорию удаляем совсем (вместе с её шаблонным лимитом).
+    Возвращает ``'deleted'`` или ``'archived'``.
+    """
+    if await _has_transactions(session, category.id):
+        category.is_archived = True
+        await session.commit()
+        return "archived"
+
+    await session.execute(delete(Budget).where(Budget.category_id == category.id))
+    await session.delete(category)
+    await session.commit()
+    return "deleted"
+
+
+async def delete_group(
+    session: AsyncSession, user_id: int, article: str, group: str
+) -> dict[str, int]:
+    """Удаляет категорию (группу) целиком: применяет к каждой её подкатегории
+    правило ``delete_subcategory`` (пустые — удаляет, с историей — архивирует).
+
+    Возвращает ``{'deleted': N, 'archived': M}``. ``ValueError('group not found')``,
+    если активных подкатегорий в группе нет.
+    """
+    subs = list(
+        await session.scalars(
+            select(Category).where(
+                Category.user_id == user_id,
+                Category.article == article,
+                Category.group == group,
+                Category.is_archived == False,  # noqa: E712
+            )
+        )
+    )
+    if not subs:
+        raise ValueError("group not found")
+
+    deleted = archived = 0
+    for sub in subs:
+        if await delete_subcategory(session, sub) == "deleted":
+            deleted += 1
+        else:
+            archived += 1
+    return {"deleted": deleted, "archived": archived}
