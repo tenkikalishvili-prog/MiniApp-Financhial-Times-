@@ -14,6 +14,7 @@ from backend.models import User
 from backend.services import categories as categories_svc
 from backend.services import onboarding as onboarding_svc
 from backend.services import reports
+from backend.services import settings as settings_svc
 from backend.services import transactions as tx_svc
 from backend.services.limits import DISCRETIONARY_GROUP, get_daily_limit
 
@@ -26,6 +27,8 @@ from .schemas import (
     MeOut,
     OnboardingIn,
     OverviewOut,
+    SettingsOut,
+    SettingsUpdate,
     SliceOut,
     SubcategoryOut,
     TopSpendOut,
@@ -100,6 +103,44 @@ async def submit_onboarding(
         monthly_spending=body.monthly_spending,
     )
     return _me_out(updated)
+
+
+# ── Настройки уведомлений ────────────────────────────────────────────────
+def _settings_out(user: User) -> SettingsOut:
+    s = settings_svc.get_notification_settings(user)
+    return SettingsOut(
+        timezone=s.timezone,
+        morning_enabled=s.morning_enabled,
+        morning_hour=s.morning_hour,
+        evening_enabled=s.evening_enabled,
+        evening_hour=s.evening_hour,
+    )
+
+
+@router.get("/settings", response_model=SettingsOut)
+async def get_settings(user: CurrentUser) -> SettingsOut:
+    return _settings_out(user)
+
+
+@router.patch("/settings", response_model=SettingsOut)
+async def update_settings(
+    body: SettingsUpdate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> SettingsOut:
+    """Меняет настройки уведомлений (часовой пояс, вкл/выкл и час утра/вечера)."""
+    if body.timezone is not None and not settings_svc.is_valid_timezone(body.timezone):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "unknown timezone")
+    updated = await settings_svc.update_notification_settings(
+        session,
+        user,
+        timezone=body.timezone,
+        morning_enabled=body.morning_enabled,
+        morning_hour=body.morning_hour,
+        evening_enabled=body.evening_enabled,
+        evening_hour=body.evening_hour,
+    )
+    return _settings_out(updated)
 
 
 # ── Обзор месяца (Главная) ───────────────────────────────────────────────

@@ -34,6 +34,23 @@ class OnboardingIn(CamelModel):
     monthly_spending: Optional[float] = Field(default=None, validation_alias="monthlySpending")
 
 
+# ── Настройки уведомлений бота ───────────────────────────────────────────
+class SettingsOut(CamelModel):
+    timezone: str
+    morning_enabled: bool = Field(serialization_alias="morningEnabled")
+    morning_hour: int = Field(serialization_alias="morningHour")
+    evening_enabled: bool = Field(serialization_alias="eveningEnabled")
+    evening_hour: int = Field(serialization_alias="eveningHour")
+
+
+class SettingsUpdate(CamelModel):
+    timezone: Optional[str] = Field(default=None)
+    morning_enabled: Optional[bool] = Field(default=None, validation_alias="morningEnabled")
+    morning_hour: Optional[int] = Field(default=None, ge=0, le=23, validation_alias="morningHour")
+    evening_enabled: Optional[bool] = Field(default=None, validation_alias="eveningEnabled")
+    evening_hour: Optional[int] = Field(default=None, ge=0, le=23, validation_alias="eveningHour")
+
+
 # ── Обзор месяца ─────────────────────────────────────────────────────────
 class TopSpendOut(CamelModel):
     category_id: int = Field(serialization_alias="subcategoryId")

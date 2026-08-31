@@ -69,10 +69,16 @@ def _ensure_user_columns(conn) -> None:
     dt_type = "TIMESTAMP" if is_pg else "DATETIME"
 
     existing = {col["name"] for col in inspect(conn).get_columns("users")}
+    # Для новых столбцов с DEFAULT: ADD COLUMN проставит значение всем существующим
+    # строкам, поэтому уже заведённые пользователи сохраняют привычные 9:00 / 23:00.
     to_add = {
         "onboarded_at": dt_type,
         "monthly_income": "NUMERIC(12, 2)",
         "discretionary_budget": "NUMERIC(12, 2)",
+        "morning_enabled": "BOOLEAN DEFAULT TRUE",
+        "morning_hour": "INTEGER DEFAULT 9",
+        "evening_enabled": "BOOLEAN DEFAULT TRUE",
+        "evening_hour": "INTEGER DEFAULT 23",
     }
 
     onboarded_was_missing = "onboarded_at" not in existing

@@ -16,6 +16,7 @@ from sqlalchemy import (
     Date,
     DateTime,
     ForeignKey,
+    Integer,
     Numeric,
     String,
     UniqueConstraint,
@@ -47,6 +48,14 @@ class User(Base):
     # Общий месячный лимит на группу «Траты» (с онбординга). Питает дневной лимит,
     # пока пользователь не задал лимиты по подкатегориям вручную (тогда берётся их сумма).
     discretionary_budget: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+
+    # ── Настройки уведомлений бота (экран «Настройки» в Mini App) ────────
+    # Час — по часовому поясу пользователя (User.timezone). Раньше был хардкод
+    # 9:00 / 23:00 в планировщике; теперь каждый настраивает под себя.
+    morning_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    morning_hour: Mapped[int] = mapped_column(Integer, default=9)
+    evening_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    evening_hour: Mapped[int] = mapped_column(Integer, default=23)
 
     categories: Mapped[list[Category]] = relationship(back_populates="user")
     transactions: Mapped[list[Transaction]] = relationship(back_populates="user")

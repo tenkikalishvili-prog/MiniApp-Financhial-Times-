@@ -18,7 +18,7 @@ from aiogram.types import BotCommand
 from backend.config import settings
 from backend.db import init_db
 from bot.handlers import add_transaction, admin, notifications, start
-from bot.scheduler import EVENING_HOUR, MORNING_HOUR, TIMEZONE, setup_scheduler
+from bot.scheduler import TIMEZONE, setup_scheduler
 
 
 async def _set_commands(bot: Bot) -> None:
@@ -51,9 +51,7 @@ async def main() -> None:
     await _set_commands(bot)
     setup_scheduler(bot)
     logging.info(
-        "Бот запущен. Утренний лимит в %02d:00, вечерняя сводка в %02d:00 (%s).",
-        MORNING_HOUR,
-        EVENING_HOUR,
+        "Бот запущен. Уведомления — почасовой тик, время у каждого своё (опорный пояс %s).",
         TIMEZONE,
     )
     logging.info("Ожидаю сообщения…")
