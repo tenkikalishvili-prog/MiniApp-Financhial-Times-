@@ -17,7 +17,7 @@ from aiogram.types import BotCommand
 
 from backend.config import settings
 from backend.db import init_db
-from bot.handlers import add_transaction, admin, notifications, start
+from bot.handlers import add_transaction, admin, notifications, smart_add, start
 from bot.scheduler import TIMEZONE, setup_scheduler
 
 
@@ -47,6 +47,9 @@ async def main() -> None:
     dp.include_router(admin.router)  # скрытые команды владельца (/reset_onboarding) — до мастера
     dp.include_router(notifications.router)  # команды /limit, /day — до мастера ввода
     dp.include_router(add_transaction.router)
+    # Умный ввод (свободный текст) — ПОСЛЕДНИМ: его catch-all по тексту не должен
+    # перехватывать кнопку меню и шаги мастера (их роутеры идут раньше).
+    dp.include_router(smart_add.router)
 
     await _set_commands(bot)
     setup_scheduler(bot)

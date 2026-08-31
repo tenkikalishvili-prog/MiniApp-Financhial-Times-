@@ -59,3 +59,51 @@ def subcategories_kb(categories: list[Category]) -> InlineKeyboardMarkup:
     # 1 колонка — длинные названия не обрезаются ни на телефоне, ни на десктопе (адаптивность №11)
     builder.adjust(1)
     return builder.as_markup()
+
+
+# ─── Умный ввод (S4): свободный текст «кофе 350» → карточка-подтверждение ───
+def smart_confirm_kb(matched: bool) -> InlineKeyboardMarkup:
+    """Карточка после разбора текста. Категория угадана → «Записать» + «Другая
+    категория»; не угадана → только «Выбрать категорию»."""
+    builder = InlineKeyboardBuilder()
+    if matched:
+        builder.button(text="✅ Записать", callback_data="smart:save")
+        builder.button(text="✏️ Другая категория", callback_data="smart:pick")
+    else:
+        builder.button(text="🗂 Выбрать категорию", callback_data="smart:pick")
+    builder.button(text="✖️ Отмена", callback_data="smart:cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def smart_article_kb() -> InlineKeyboardMarkup:
+    """Выбор статьи в умном вводе (сумма уже известна)."""
+    builder = InlineKeyboardBuilder()
+    for code, title in ARTICLES:
+        builder.button(text=title, callback_data=f"smart:art:{code}")
+    builder.button(text="✖️ Отмена", callback_data="smart:cancel")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def smart_groups_kb(groups: list[str]) -> InlineKeyboardMarkup:
+    """Выбор категории (группы) в умном вводе. В callback — индекс из списка."""
+    builder = InlineKeyboardBuilder()
+    for index, group in enumerate(groups):
+        builder.button(text=group, callback_data=f"smart:grp:{index}")
+    builder.button(text="⬅️ К статье", callback_data="smart:pick")
+    builder.adjust(1)
+    return builder.as_markup()
+
+
+def smart_subcategories_kb(categories: list[Category]) -> InlineKeyboardMarkup:
+    """Выбор подкатегории в умном вводе. В callback — реальный id категории."""
+    builder = InlineKeyboardBuilder()
+    for category in categories:
+        emoji = f"{category.emoji} " if category.emoji else ""
+        builder.button(
+            text=f"{emoji}{category.name}", callback_data=f"smart:sub:{category.id}"
+        )
+    builder.button(text="⬅️ К категориям", callback_data="smart:back:group")
+    builder.adjust(1)
+    return builder.as_markup()
