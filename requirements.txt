@@ -21,6 +21,10 @@ tzdata>=2024.1
 fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30
 
-# S5: автокатегоризация умного ввода через Claude API (Haiku).
+# S5/S7: категоризация и OCR чеков через Claude API (Haiku + vision).
 # Без ключа ANTHROPIC_API_KEY пакет не задействуется (фолбэк на эвристику).
 anthropic>=0.40,<2.0
+
+# S6: транскрипция голоса через OpenAI Whisper.
+# Без ключа OPENAI_API_KEY пакет не задействуется (голос выключен).
+openai>=1.40,<2.0

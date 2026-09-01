@@ -254,26 +254,36 @@ class ParsedInput:
     category: Optional[Category]  # подобранная подкатегория (или None)
 
 
-async def interpret(session: AsyncSession, user_id: int, text: str) -> ParsedInput:
-    """«кофе 350» → ParsedInput(сумма, описание, статья, подкатегория).
+async def resolve_category(
+    session: AsyncSession, user_id: int, description: str, article: str
+) -> Optional[Category]:
+    """Подбор подкатегории по описанию: Claude (S5) с фолбэком на эвристику S4.
 
-    Подбор подкатегории (S5): сначала Claude по всем активным категориям (умнее,
-    определяет и статью), при недоступности AI — детерминированная эвристика S4.
+    Единая точка для всех каналов умного ввода: свободный текст, OCR чеков (S7),
+    расшифровка голоса (S6). ``article`` — предполагаемая статья для фолбэк-эвристики
+    (AI выбирает по всем статьям сам).
     """
+    if not description:
+        return None
+    # S5: сначала Claude по всем активным подкатегориям пользователя.
+    all_cats = await _all_active_categories(session, user_id)
+    cid = await ai_match_category(description, all_cats)
+    if cid is not None:
+        cat = next((c for c in all_cats if c.id == cid), None)
+        if cat is not None:
+            return cat
+    # Фолбэк S4: AI выключен / вернул 0 / ошибка → эвристика по предполагаемой статье.
+    return await match_category(session, user_id, description, article)
+
+
+async def interpret(session: AsyncSession, user_id: int, text: str) -> ParsedInput:
+    """«кофе 350» → ParsedInput(сумма, описание, статья, подкатегория)."""
     amount, description = parse_amount(text or "")
     article = guess_article(description)
     category: Optional[Category] = None
 
     if description:
-        # S5: сначала пробуем Claude по всем активным подкатегориям пользователя.
-        all_cats = await _all_active_categories(session, user_id)
-        cid = await ai_match_category(description, all_cats)
-        if cid is not None:
-            category = next((c for c in all_cats if c.id == cid), None)
-        # Фолбэк S4: AI выключен / вернул 0 / ошибка → эвристика по предполагаемой статье.
-        if category is None:
-            category = await match_category(session, user_id, description, article)
-
+        category = await resolve_category(session, user_id, description, article)
     if category is not None:
         article = category.article  # статья берётся из подобранной подкатегории
 

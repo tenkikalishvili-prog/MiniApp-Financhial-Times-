@@ -67,6 +67,16 @@ def _get_client():
     return _client
 
 
+def get_client():
+    """Публичный доступ к клиенту Anthropic (переиспользуется OCR-сервисом S7)."""
+    return _get_client()
+
+
+def ai_enabled() -> bool:
+    """Есть ли рабочий клиент Anthropic (ключ задан, пакет установлен)."""
+    return _get_client() is not None
+
+
 def _build_catalog(categories: list[Category]) -> str:
     """Нумерованный список подкатегорий для промпта: «12. Расход · Траты · Кафе»."""
     return "\n".join(

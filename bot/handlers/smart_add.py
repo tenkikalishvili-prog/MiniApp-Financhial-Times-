@@ -118,7 +118,11 @@ async def _finish_save(callback: CallbackQuery, state: FSMContext, category_id: 
     data = await state.get_data()
     amount = Decimal(data["amount"])
     description = data.get("description")
-    today = date.today()
+    # Источник записи: 'bot_text' (умный текст) или 'bot_photo' (чек, S7).
+    source = data.get("source", "bot_text")
+    # Дата: с чека может прийти своя (ISO); иначе — сегодня.
+    on_date = date.fromisoformat(data["on_date"]) if data.get("on_date") else date.today()
+    today = on_date
 
     async with async_session() as session:
         category = await get_category(session, category_id)
@@ -131,8 +135,9 @@ async def _finish_save(callback: CallbackQuery, state: FSMContext, category_id: 
             category_id=category.id,
             article=category.article,
             amount=amount,
-            source="bot_text",
+            source=source,
             description=description,
+            on_date=on_date,
         )
         budget_line = ""
         if category.article == "expense":

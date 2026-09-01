@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     # Модель категоризатора: простая классификация → дёшево и быстро (Haiku).
     ai_model: str = "claude-haiku-4-5"
 
+    # ── S6: голосовой ввод через OpenAI Whisper (ДРУГОЙ провайдер, не Anthropic) ──
+    # Ключ OpenAI. Пусто (None) → голос выключен (бот вежливо сообщит).
+    openai_api_key: Optional[str] = None
+    # Модель транскрипции. whisper-1 — дёшево ($0.006/мин) и с поддержкой русского.
+    whisper_model: str = "whisper-1"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
