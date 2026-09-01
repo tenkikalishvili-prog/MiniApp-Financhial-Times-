@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Budget, Category, Transaction
@@ -257,10 +257,22 @@ async def recent_transactions(
     session: AsyncSession,
     user_id: int,
     limit: int = 30,
+    offset: int = 0,
     year: int | None = None,
     month: int | None = None,
+    article: str | None = None,
+    group: str | None = None,
+    query: str | None = None,
 ) -> list[Transaction]:
-    """Последние операции с подгруженной категорией. Опционально — за месяц."""
+    """Операции с подгруженной категорией — для Главной и экрана «История».
+
+    Все фильтры опциональны и комбинируются:
+    - ``year``/``month`` — период (пара, иначе игнорируются);
+    - ``article`` — статья (income/expense/debt);
+    - ``group`` — имя категории (группы);
+    - ``query`` — поиск по описанию операции и названию подкатегории;
+    - ``offset``/``limit`` — постраничная выдача (сортировка: сначала новые).
+    """
     from sqlalchemy.orm import selectinload
 
     stmt = (
@@ -268,11 +280,26 @@ async def recent_transactions(
         .where(Transaction.user_id == user_id)
         .options(selectinload(Transaction.category))
         .order_by(Transaction.date.desc(), Transaction.id.desc())
-        .limit(limit)
     )
     if year is not None and month is not None:
         start, end = month_bounds(year, month)
         stmt = stmt.where(Transaction.date >= start, Transaction.date < end)
+    if article:
+        stmt = stmt.where(Transaction.article == article)
+    # Фильтр по группе и поиск требуют присоединить Category (связь 1:1 — без дублей).
+    if group or query:
+        stmt = stmt.join(Category, Category.id == Transaction.category_id)
+    if group:
+        stmt = stmt.where(Category.group == group)
+    if query:
+        pattern = f"%{query.strip()}%"
+        stmt = stmt.where(
+            or_(
+                Transaction.description.ilike(pattern),
+                Category.name.ilike(pattern),
+            )
+        )
 
+    stmt = stmt.offset(offset).limit(limit)
     result = await session.execute(stmt)
     return list(result.scalars())

@@ -474,12 +474,27 @@ async def list_transactions(
     session: SessionDep,
     month: Optional[str] = Query(default=None),
     limit: int = Query(default=30, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    article: Optional[str] = Query(default=None, description="income | expense | debt"),
+    group: Optional[str] = Query(default=None, description="имя категории (группы)"),
+    q: Optional[str] = Query(default=None, description="поиск по описанию и подкатегории"),
 ) -> list[TransactionOut]:
+    """Список операций (Главная + экран «История»). Все фильтры опциональны."""
     year = mon = None
     if month:
         year, mon, _ = _parse_month(month)
+    if article is not None and article not in ("income", "expense", "debt"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad article")
     rows = await reports.recent_transactions(
-        session, user.id, limit=limit, year=year, month=mon
+        session,
+        user.id,
+        limit=limit,
+        offset=offset,
+        year=year,
+        month=mon,
+        article=article,
+        group=group,
+        query=q,
     )
     return [_tx_out(t) for t in rows]
 
