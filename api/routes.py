@@ -46,6 +46,7 @@ from .schemas import (
     TopSpendOut,
     TransactionCreate,
     TransactionOut,
+    TransactionUpdate,
 )
 
 router = APIRouter(prefix="/api")
@@ -522,6 +523,42 @@ async def create_transaction(
         on_date=body.date,
     )
     # подгружаем категорию для ответа
+    tx.category = category
+    return _tx_out(tx)
+
+
+@router.patch("/transactions/{tx_id}", response_model=TransactionOut)
+async def update_transaction(
+    tx_id: int,
+    body: TransactionUpdate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> TransactionOut:
+    """Редактирование операции: сумма / категория / дата / заметка (любое подмножество).
+
+    При смене категории статья (``article``) синхронизируется с новой категорией —
+    так операцию можно переносить между расходом/доходом/долгом.
+    """
+    tx = await session.get(Transaction, tx_id)
+    if tx is None or tx.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "transaction not found")
+
+    category = await session.get(Category, tx.category_id)
+    if body.category_id is not None and body.category_id != tx.category_id:
+        category = await session.get(Category, body.category_id)
+        if category is None or category.user_id != user.id:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "category not found")
+        tx.category_id = category.id
+        tx.article = category.article
+
+    if body.amount is not None:
+        tx.amount = Decimal(str(body.amount))
+    if body.on_date is not None:
+        tx.date = body.on_date
+    if body.comment is not None:
+        tx.description = body.comment.strip() or None
+
+    await session.commit()
     tx.category = category
     return _tx_out(tx)
 

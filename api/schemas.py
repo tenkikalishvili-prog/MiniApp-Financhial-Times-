@@ -188,6 +188,20 @@ class TransactionCreate(CamelModel):
     comment: Optional[str] = None
 
 
+class TransactionUpdate(CamelModel):
+    """Частичное изменение операции. Любое поле опционально — меняем присланные.
+
+    ``on_date`` (alias ``date``) намеренно НЕ называется ``date``: одноимённое поле
+    в связке с ``from __future__ import annotations`` затеняет тип ``date`` собственным
+    значением по умолчанию, и pydantic резолвит тип в NoneType.
+    """
+
+    amount: Optional[float] = Field(default=None, gt=0)
+    category_id: Optional[int] = Field(default=None, validation_alias="categoryId")
+    on_date: Optional[date] = Field(default=None, validation_alias="date")
+    comment: Optional[str] = None
+
+
 # ── Изменение бюджета подкатегории ───────────────────────────────────────
 class BudgetSet(CamelModel):
     amount: float
