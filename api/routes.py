@@ -17,6 +17,7 @@ from backend.services import reports
 from backend.services import settings as settings_svc
 from backend.services import transactions as tx_svc
 from backend.services.limits import DISCRETIONARY_GROUP, get_daily_limit
+from backend.services.smart_input import interpret
 
 from .deps import CurrentUser, SessionDep
 from .schemas import (
@@ -38,6 +39,8 @@ from .schemas import (
     SettingsOut,
     SettingsUpdate,
     SliceOut,
+    SmartParseIn,
+    SmartParseOut,
     SubcategoryCreate,
     SubcategoryOut,
     TopSpendOut,
@@ -435,6 +438,33 @@ async def rename_category(
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     return SubcategoryOut(id=updated.id, name=updated.name, emoji=updated.emoji)
+
+
+# ── Умный ввод (экран «Добавить») ────────────────────────────────────────
+@router.post("/smart-parse", response_model=SmartParseOut)
+async def smart_parse(
+    body: SmartParseIn,
+    user: CurrentUser,
+    session: SessionDep,
+) -> SmartParseOut:
+    """«кофе 350» → сумма + подобранная подкатегория для предзаполнения формы.
+
+    Переиспользует ``smart_input.interpret`` (та же логика, что в боте: Claude S5
+    при наличии ключа, иначе детерминированная эвристика S4). Ничего не пишет в БД —
+    только разбирает текст.
+    """
+    parsed = await interpret(session, user.id, body.text or "")
+    cat = parsed.category
+    return SmartParseOut(
+        amount=float(parsed.amount) if parsed.amount is not None else None,
+        description=parsed.description,
+        article=parsed.article,
+        matched=cat is not None,
+        category_id=cat.id if cat else None,
+        group=cat.group if cat else None,
+        subcategory_name=cat.name if cat else None,
+        emoji=cat.emoji if cat else None,
+    )
 
 
 # ── Операции ─────────────────────────────────────────────────────────────

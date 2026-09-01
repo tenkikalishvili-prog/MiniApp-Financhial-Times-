@@ -191,3 +191,19 @@ class TransactionCreate(CamelModel):
 # ── Изменение бюджета подкатегории ───────────────────────────────────────
 class BudgetSet(CamelModel):
     amount: float
+
+
+# ── Умный ввод (S5 в приложении): «кофе 350» → предзаполнение ─────────────
+class SmartParseIn(CamelModel):
+    text: str
+
+
+class SmartParseOut(CamelModel):
+    amount: Optional[float]          # None — сумму распознать не удалось
+    description: str                 # очищенное описание (без суммы/валюты)
+    article: str                     # предполагаемая статья: expense | income | debt
+    matched: bool                    # угадана ли подкатегория
+    category_id: Optional[int] = Field(default=None, serialization_alias="categoryId")
+    group: Optional[str] = None      # категория (группа) подобранной подкатегории
+    subcategory_name: Optional[str] = Field(default=None, serialization_alias="subcategoryName")
+    emoji: Optional[str] = None
