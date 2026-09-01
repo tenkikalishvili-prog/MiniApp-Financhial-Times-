@@ -117,13 +117,30 @@ async def cmd_day(message: Message) -> None:
 
 # ─── Рассылка по расписанию (вызывается планировщиком) ──────────────────
 
-async def _safe_send(bot: Bot, telegram_id: int, text: str, tag: str) -> None:
+async def _safe_send(bot: Bot, telegram_id: int, text: str, tag: str) -> bool:
+    """Шлёт сообщение, гася ошибки. True — доставлено, False — заблокирован/ошибка."""
     try:
         await bot.send_message(telegram_id, text)
+        return True
     except TelegramForbiddenError:
         logging.info("%s: пользователь %s заблокировал бота", tag, telegram_id)
+        return False
     except Exception as error:  # noqa: BLE001
         logging.warning("%s: не отправлено %s: %s", tag, telegram_id, error)
+        return False
+
+
+async def broadcast(bot: Bot, users: list[User], text: str, tag: str = "Рассылка") -> tuple[int, int]:
+    """Рассылает один и тот же текст всем users.
+
+    Возвращает (доставлено, не доставлено). Заблокировавшие бота и ошибки
+    отправки не роняют рассылку — просто попадают во второе число.
+    """
+    delivered = 0
+    for user in users:
+        if await _safe_send(bot, user.telegram_id, text, tag):
+            delivered += 1
+    return delivered, len(users) - delivered
 
 
 async def _send_morning(bot: Bot, session, user: User, on_date: date) -> None:

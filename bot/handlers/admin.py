@@ -4,13 +4,16 @@
 - /reset_box [confirm] — сбросить ВСЕХ, кроме владельца, до нейтральной «коробки»
   (без аргумента показывает предпросмотр; с `confirm` — выполняет). Нужно, чтобы
   починить пользователей, которым старый бот засеял личный набор владельца.
+- /announce [confirm] — разослать всем пользователям обзор обновления «Что нового»
+  (без аргумента — предпросмотр; с `confirm` — рассылка). Текст берётся из
+  bot/changelog.py (LATEST).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-from aiogram import Router
+from aiogram import Bot, Router
 from aiogram.filters import Command
 from aiogram.filters.command import CommandObject
 from aiogram.types import Message
@@ -21,6 +24,9 @@ from backend.config import settings
 from backend.db import async_session
 from backend.models import Budget, Category, Transaction, User
 from backend.seed import seed_categories
+from backend.services.users import get_all_users
+from bot.changelog import LATEST, format_release
+from bot.handlers.notifications import broadcast
 
 router = Router()
 
@@ -143,3 +149,43 @@ async def cmd_reset_box(message: Message, command: CommandObject) -> None:
             f"(удалено операций: {result.total_tx}). Твои данные не тронуты.\n"
             "Теперь у них — нейтральная «коробка»."
         )
+
+
+# ─── /announce — рассылка обзора обновления «Что нового» ────────────────────
+
+
+@router.message(Command("announce"))
+async def cmd_announce(message: Message, command: CommandObject, bot: Bot) -> None:
+    """Владелец: /announce [confirm] — разослать всем обзор обновления «Что нового».
+
+    Без аргумента — предпросмотр (сам текст + число получателей). С `confirm` —
+    отправка всем пользователям. Текст берётся из bot/changelog.py (LATEST).
+    """
+    if not _is_owner(message):
+        return  # скрытая команда — не-владельцу молчим
+
+    text = format_release(LATEST)
+    confirm = (command.args or "").strip().lower() == "confirm"
+
+    async with async_session() as session:
+        users = await get_all_users(session)
+
+    if not confirm:
+        await message.answer(
+            f"📣 <b>Предпросмотр рассылки «Что нового».</b> Получат: <b>{len(users)}</b> польз.\n"
+            "─────────────\n"
+            f"{text}\n"
+            "─────────────\n"
+            "Отправить всем: <code>/announce confirm</code>"
+        )
+        return
+
+    if not users:
+        await message.answer("В базе нет пользователей — некому рассылать.")
+        return
+
+    delivered, failed = await broadcast(bot, users, text, "Анонс")
+    tail = f", не доставлено: {failed}" if failed else ""
+    await message.answer(
+        f"✅ Рассылка «Что нового» отправлена.\nДоставлено: <b>{delivered}</b>{tail}."
+    )
