@@ -22,6 +22,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.models import Category
+from backend.services.ai_categorize import ai_match_category
 
 # ─────────────────────────────────────────────────────────────────────────
 # Разбор суммы
@@ -193,6 +194,21 @@ async def _active_subcategories(
     return list(result.scalars())
 
 
+async def _all_active_categories(
+    session: AsyncSession, user_id: int
+) -> list[Category]:
+    """Все активные подкатегории пользователя по всем статьям (для AI-подбора S5)."""
+    result = await session.execute(
+        select(Category)
+        .where(
+            Category.user_id == user_id,
+            Category.is_archived == False,  # noqa: E712
+        )
+        .order_by(Category.article, Category.sort_order)
+    )
+    return list(result.scalars())
+
+
 async def match_category(
     session: AsyncSession, user_id: int, hint: str, article: str
 ) -> Optional[Category]:
@@ -239,12 +255,28 @@ class ParsedInput:
 
 
 async def interpret(session: AsyncSession, user_id: int, text: str) -> ParsedInput:
-    """«кофе 350» → ParsedInput(сумма, описание, статья, подкатегория)."""
+    """«кофе 350» → ParsedInput(сумма, описание, статья, подкатегория).
+
+    Подбор подкатегории (S5): сначала Claude по всем активным категориям (умнее,
+    определяет и статью), при недоступности AI — детерминированная эвристика S4.
+    """
     amount, description = parse_amount(text or "")
     article = guess_article(description)
-    category = None
+    category: Optional[Category] = None
+
     if description:
-        category = await match_category(session, user_id, description, article)
+        # S5: сначала пробуем Claude по всем активным подкатегориям пользователя.
+        all_cats = await _all_active_categories(session, user_id)
+        cid = await ai_match_category(description, all_cats)
+        if cid is not None:
+            category = next((c for c in all_cats if c.id == cid), None)
+        # Фолбэк S4: AI выключен / вернул 0 / ошибка → эвристика по предполагаемой статье.
+        if category is None:
+            category = await match_category(session, user_id, description, article)
+
+    if category is not None:
+        article = category.article  # статья берётся из подобранной подкатегории
+
     return ParsedInput(
         amount=amount,
         description=description,

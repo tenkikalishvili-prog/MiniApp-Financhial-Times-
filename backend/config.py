@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     # при сбросе пользователей до нейтральной «коробки» (devtools.py reset-box).
     owner_telegram_id: Optional[int] = 344273869
 
+    # ── S5: автокатегоризация умного ввода через Claude API ──────────────
+    # Ключ Anthropic. Пусто (None) → AI выключен, работает эвристика S4.
+    # На проде задаётся переменной окружения ANTHROPIC_API_KEY (Railway).
+    anthropic_api_key: Optional[str] = None
+    # Модель категоризатора: простая классификация → дёшево и быстро (Haiku).
+    ai_model: str = "claude-haiku-4-5"
+
     @property
     def cors_origin_list(self) -> list[str]:
         return [o.strip() for o in self.cors_origins.split(",") if o.strip()]
