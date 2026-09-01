@@ -4,9 +4,9 @@
 - /reset_box [confirm] — сбросить ВСЕХ, кроме владельца, до нейтральной «коробки»
   (без аргумента показывает предпросмотр; с `confirm` — выполняет). Нужно, чтобы
   починить пользователей, которым старый бот засеял личный набор владельца.
-- /announce [confirm] — разослать всем пользователям обзор обновления «Что нового»
-  (без аргумента — предпросмотр; с `confirm` — рассылка). Текст берётся из
-  bot/changelog.py (LATEST).
+- /announce [test|confirm] — обзор обновления «Что нового» (без аргумента —
+  предпросмотр; `test` — отправить только себе; `confirm` — рассылка всем).
+  Текст берётся из bot/changelog.py (LATEST).
 """
 
 from __future__ import annotations
@@ -156,16 +156,25 @@ async def cmd_reset_box(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("announce"))
 async def cmd_announce(message: Message, command: CommandObject, bot: Bot) -> None:
-    """Владелец: /announce [confirm] — разослать всем обзор обновления «Что нового».
+    """Владелец: /announce [test|confirm] — обзор обновления «Что нового».
 
-    Без аргумента — предпросмотр (сам текст + число получателей). С `confirm` —
-    отправка всем пользователям. Текст берётся из bot/changelog.py (LATEST).
+    Без аргумента — предпросмотр (сам текст + число получателей).
+    `test` — отправить обзор только себе (боевой вид, никого больше не трогает).
+    `confirm` — разослать всем пользователям. Текст берётся из bot/changelog.py (LATEST).
     """
     if not _is_owner(message):
         return  # скрытая команда — не-владельцу молчим
 
     text = format_release(LATEST)
-    confirm = (command.args or "").strip().lower() == "confirm"
+    arg = (command.args or "").strip().lower()
+
+    # test — отправляем обзор только владельцу, до базы не ходим и никого не трогаем
+    if arg == "test":
+        await message.answer(text)
+        await message.answer("🧪 Тест: обзор отправлен только тебе (см. выше). Рассылки не было.")
+        return
+
+    confirm = arg == "confirm"
 
     async with async_session() as session:
         users = await get_all_users(session)
@@ -176,6 +185,7 @@ async def cmd_announce(message: Message, command: CommandObject, bot: Bot) -> No
             "─────────────\n"
             f"{text}\n"
             "─────────────\n"
+            "Проверить на себе: <code>/announce test</code>\n"
             "Отправить всем: <code>/announce confirm</code>"
         )
         return
