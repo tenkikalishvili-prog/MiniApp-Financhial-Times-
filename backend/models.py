@@ -111,3 +111,29 @@ class Transaction(Base):
 
     user: Mapped[User] = relationship(back_populates="transactions")
     category: Mapped[Category] = relationship()
+
+
+class Debt(Base):
+    """Долг в реестре обязательств (направление C, S8).
+
+    Отдельная сущность, НЕ операция со статьёй ``debt``: это карточка обязательства —
+    кому/кто должен, сумма, срок, остаток. Возвраты и пересчёт остатка — S9 (пока
+    ``paid`` = 0, остаток = ``amount``). Модель сразу заложена под оба направления.
+    """
+
+    __tablename__ = "debts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    # owe  → я должен кому-то;  lent → мне должны.
+    direction: Mapped[str] = mapped_column(String(8))
+    counterparty: Mapped[str] = mapped_column(String(128))  # кому / кто
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))  # изначальная сумма долга
+    # Погашено на данный момент (наполнится в S9). Остаток = amount − paid.
+    paid: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)  # срок возврата
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_closed: Mapped[bool] = mapped_column(Boolean, default=False)  # закрыт (возвращён)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    user: Mapped[User] = relationship()

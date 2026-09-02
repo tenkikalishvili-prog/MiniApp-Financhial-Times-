@@ -221,3 +221,36 @@ class SmartParseOut(CamelModel):
     group: Optional[str] = None      # категория (группа) подобранной подкатегории
     subcategory_name: Optional[str] = Field(default=None, serialization_alias="subcategoryName")
     emoji: Optional[str] = None
+
+
+# ── Долги (направление C, S8) ────────────────────────────────────────────
+class DebtOut(CamelModel):
+    id: int
+    direction: str                   # owe — я должен; lent — мне должны
+    counterparty: str                # кому / кто должен
+    amount: float                    # изначальная сумма
+    paid: float                      # погашено (S9; пока 0)
+    remaining: float                 # остаток = amount − paid
+    due_date: Optional[date] = Field(default=None, serialization_alias="dueDate")
+    note: Optional[str] = None
+    is_closed: bool = Field(serialization_alias="isClosed")
+
+
+class DebtCreate(CamelModel):
+    direction: str
+    counterparty: str
+    amount: float
+    # ``due_date`` (alias ``dueDate``) намеренно НЕ называется ``date`` — см. TransactionCreate.
+    due_date: Optional[date] = Field(default=None, validation_alias="dueDate")
+    note: Optional[str] = None
+
+
+class DebtUpdate(CamelModel):
+    """Частичное изменение долга. Любое поле опционально — меняем присланные."""
+
+    direction: Optional[str] = None
+    counterparty: Optional[str] = None
+    amount: Optional[float] = Field(default=None, gt=0)
+    due_date: Optional[date] = Field(default=None, validation_alias="dueDate")
+    note: Optional[str] = None
+    is_closed: Optional[bool] = Field(default=None, validation_alias="isClosed")

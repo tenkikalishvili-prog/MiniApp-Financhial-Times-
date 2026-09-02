@@ -9,9 +9,10 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import select
 
-from backend.models import Budget, Category, Transaction
+from backend.models import Budget, Category, Debt, Transaction
 from backend.models import User
 from backend.services import categories as categories_svc
+from backend.services import debts as debts_svc
 from backend.services import onboarding as onboarding_svc
 from backend.services import reports
 from backend.services import settings as settings_svc
@@ -29,6 +30,9 @@ from .schemas import (
     CategoryGroupOut,
     CategoryRename,
     CreatedSubcategoryOut,
+    DebtCreate,
+    DebtOut,
+    DebtUpdate,
     DeleteResultOut,
     GroupDeleteResultOut,
     GroupRename,
@@ -78,6 +82,22 @@ def _tx_out(t: Transaction) -> TransactionOut:
         amount=float(t.amount),
         date=t.date,
         comment=t.description,
+    )
+
+
+def _debt_out(d: Debt) -> DebtOut:
+    amount = float(d.amount)
+    paid = float(d.paid)
+    return DebtOut(
+        id=d.id,
+        direction=d.direction,
+        counterparty=d.counterparty,
+        amount=amount,
+        paid=paid,
+        remaining=round(amount - paid, 2),
+        due_date=d.due_date,
+        note=d.note,
+        is_closed=d.is_closed,
     )
 
 
@@ -573,4 +593,89 @@ async def delete_transaction(
     if tx is None or tx.user_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "transaction not found")
     await session.delete(tx)
+    await session.commit()
+
+
+# ── Долги (направление C, S8) ────────────────────────────────────────────
+@router.get("/debts", response_model=list[DebtOut])
+async def list_debts(
+    user: CurrentUser,
+    session: SessionDep,
+    include_closed: bool = Query(False, alias="includeClosed"),
+) -> list[DebtOut]:
+    """Реестр долгов пользователя (по умолчанию — только открытые)."""
+    debts = await debts_svc.list_debts(session, user.id, include_closed=include_closed)
+    return [_debt_out(d) for d in debts]
+
+
+@router.post("/debts", response_model=DebtOut, status_code=201)
+async def create_debt(
+    body: DebtCreate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> DebtOut:
+    if body.direction not in debts_svc.DIRECTIONS:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "direction must be owe|lent")
+    name = body.counterparty.strip()
+    if not name:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "counterparty is required")
+    if body.amount <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "amount must be > 0")
+
+    debt = await debts_svc.create_debt(
+        session,
+        user_id=user.id,
+        direction=body.direction,
+        counterparty=name,
+        amount=Decimal(str(body.amount)),
+        due_date=body.due_date,
+        note=(body.note or "").strip() or None,
+    )
+    return _debt_out(debt)
+
+
+@router.patch("/debts/{debt_id}", response_model=DebtOut)
+async def update_debt(
+    debt_id: int,
+    body: DebtUpdate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> DebtOut:
+    """Правка карточки долга: направление / контрагент / сумма / срок / заметка / закрытие."""
+    debt = await session.get(Debt, debt_id)
+    if debt is None or debt.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "debt not found")
+
+    if body.direction is not None:
+        if body.direction not in debts_svc.DIRECTIONS:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "direction must be owe|lent")
+        debt.direction = body.direction
+    if body.counterparty is not None:
+        name = body.counterparty.strip()
+        if not name:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "counterparty is required")
+        debt.counterparty = name
+    if body.amount is not None:
+        debt.amount = Decimal(str(body.amount))
+    if body.due_date is not None:
+        debt.due_date = body.due_date
+    if body.note is not None:
+        debt.note = body.note.strip() or None
+    if body.is_closed is not None:
+        debt.is_closed = body.is_closed
+
+    await session.commit()
+    return _debt_out(debt)
+
+
+@router.delete("/debts/{debt_id}", status_code=204)
+async def delete_debt(
+    debt_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> None:
+    debt = await session.get(Debt, debt_id)
+    if debt is None or debt.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "debt not found")
+    await session.delete(debt)
     await session.commit()
