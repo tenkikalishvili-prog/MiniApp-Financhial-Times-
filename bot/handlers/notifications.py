@@ -23,6 +23,7 @@ from backend.services.limits import (
     get_daily_limit,
     get_evening_summary,
 )
+from backend.services.reminders import build_reminders
 from backend.services.users import get_all_users, get_or_create_user
 
 router = Router()
@@ -115,6 +116,19 @@ async def cmd_day(message: Message) -> None:
     await message.answer(format_evening(summary, today))
 
 
+@router.message(Command("reminders"))
+async def cmd_reminders(message: Message) -> None:
+    """Напоминания о платежах и долгах по запросу (и для проверки до утреннего часа)."""
+    async with async_session() as session:
+        user = await get_or_create_user(
+            session,
+            telegram_id=message.from_user.id,
+            name=message.from_user.full_name or "",
+        )
+        text = await build_reminders(session, user.id, _now_in_tz(user.timezone).date())
+    await message.answer(text or "🔔 Ближайших платежей и долгов нет — всё под контролем.")
+
+
 # ─── Рассылка по расписанию (вызывается планировщиком) ──────────────────
 
 async def _safe_send(bot: Bot, telegram_id: int, text: str, tag: str) -> bool:
@@ -153,6 +167,13 @@ async def _send_evening(bot: Bot, session, user: User, on_date: date) -> None:
     await _safe_send(bot, user.telegram_id, format_evening(summary, on_date), "Вечер")
 
 
+async def _send_reminders(bot: Bot, session, user: User, on_date: date) -> None:
+    """Шлёт напоминание о платежах/долгах, если есть о чём (иначе молчит)."""
+    text = await build_reminders(session, user.id, on_date)
+    if text:
+        await _safe_send(bot, user.telegram_id, text, "Напоминания")
+
+
 async def send_due_notifications(bot: Bot) -> None:
     """Почасовой тик: шлём тем, у кого настроенный час совпал с их локальным.
 
@@ -167,5 +188,8 @@ async def send_due_notifications(bot: Bot) -> None:
             on_date = now.date()
             if user.morning_enabled and now.hour == user.morning_hour:
                 await _send_morning(bot, session, user, on_date)
+            # Напоминания о платежах/долгах — раз в день в утренний час (свой тумблер).
+            if user.reminders_enabled and now.hour == user.morning_hour:
+                await _send_reminders(bot, session, user, on_date)
             if user.evening_enabled and now.hour == user.evening_hour:
                 await _send_evening(bot, session, user, on_date)

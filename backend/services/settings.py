@@ -21,6 +21,7 @@ class NotificationSettings:
     morning_hour: int
     evening_enabled: bool
     evening_hour: int
+    reminders_enabled: bool
 
 
 def get_notification_settings(user: User) -> NotificationSettings:
@@ -31,6 +32,7 @@ def get_notification_settings(user: User) -> NotificationSettings:
         morning_hour=user.morning_hour,
         evening_enabled=user.evening_enabled,
         evening_hour=user.evening_hour,
+        reminders_enabled=user.reminders_enabled,
     )
 
 
@@ -59,6 +61,7 @@ async def update_notification_settings(
     morning_hour: Optional[int] = None,
     evening_enabled: Optional[bool] = None,
     evening_hour: Optional[int] = None,
+    reminders_enabled: Optional[bool] = None,
 ) -> User:
     """Обновляет настройки уведомлений. Любое поле можно пропустить (None → не меняем).
 
@@ -76,6 +79,8 @@ async def update_notification_settings(
         user.evening_enabled = evening_enabled
     if evening_hour is not None:
         user.evening_hour = _clamp_hour(evening_hour)
+    if reminders_enabled is not None:
+        user.reminders_enabled = reminders_enabled
     await session.commit()
     await session.refresh(user)
     return user

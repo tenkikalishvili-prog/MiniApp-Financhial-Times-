@@ -41,6 +41,7 @@ class SettingsOut(CamelModel):
     morning_hour: int = Field(serialization_alias="morningHour")
     evening_enabled: bool = Field(serialization_alias="eveningEnabled")
     evening_hour: int = Field(serialization_alias="eveningHour")
+    reminders_enabled: bool = Field(serialization_alias="remindersEnabled")
 
 
 class SettingsUpdate(CamelModel):
@@ -49,6 +50,7 @@ class SettingsUpdate(CamelModel):
     morning_hour: Optional[int] = Field(default=None, ge=0, le=23, validation_alias="morningHour")
     evening_enabled: Optional[bool] = Field(default=None, validation_alias="eveningEnabled")
     evening_hour: Optional[int] = Field(default=None, ge=0, le=23, validation_alias="eveningHour")
+    reminders_enabled: Optional[bool] = Field(default=None, validation_alias="remindersEnabled")
 
 
 # ── Обзор месяца ─────────────────────────────────────────────────────────
@@ -254,3 +256,53 @@ class DebtUpdate(CamelModel):
     due_date: Optional[date] = Field(default=None, validation_alias="dueDate")
     note: Optional[str] = None
     is_closed: Optional[bool] = Field(default=None, validation_alias="isClosed")
+
+
+class DebtPaymentOut(CamelModel):
+    id: int
+    amount: float
+    # сериализуем как ``date`` наружу; внутри поле зовётся on_date (см. TransactionCreate).
+    on_date: date = Field(serialization_alias="date")
+
+
+class DebtPaymentCreate(CamelModel):
+    amount: float = Field(gt=0)
+    # ``on_date`` (alias ``date``) намеренно НЕ называется ``date`` — см. TransactionCreate.
+    on_date: Optional[date] = Field(default=None, validation_alias="date")
+
+
+# ── Обязательные платежи (направление C, S10) ────────────────────────────
+class BillOut(CamelModel):
+    id: int
+    title: str
+    amount: float
+    due_day: int = Field(serialization_alias="dueDay")
+    category_id: int = Field(serialization_alias="categoryId")
+    category_name: str = Field(serialization_alias="categoryName")  # подкатегория
+    group: str                                                       # категория (группа)
+    emoji: Optional[str] = None
+    note: Optional[str] = None
+    is_active: bool = Field(serialization_alias="isActive")
+    paid: bool  # оплачен ли за выбранный месяц
+
+
+class BillCreate(CamelModel):
+    title: str
+    amount: float = Field(gt=0)
+    due_day: int = Field(ge=1, le=31, validation_alias="dueDay")
+    category_id: int = Field(validation_alias="categoryId")
+    note: Optional[str] = None
+
+
+class BillUpdate(CamelModel):
+    title: Optional[str] = None
+    amount: Optional[float] = Field(default=None, gt=0)
+    due_day: Optional[int] = Field(default=None, ge=1, le=31, validation_alias="dueDay")
+    category_id: Optional[int] = Field(default=None, validation_alias="categoryId")
+    note: Optional[str] = None
+    is_active: Optional[bool] = Field(default=None, validation_alias="isActive")
+
+
+class BillPaidUpdate(CamelModel):
+    month: str          # 'YYYY-MM'
+    paid: bool

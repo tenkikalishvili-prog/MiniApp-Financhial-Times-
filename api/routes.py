@@ -7,10 +7,11 @@ from decimal import Decimal
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 
-from backend.models import Budget, Category, Debt, Transaction
+from backend.models import Bill, BillMark, Budget, Category, Debt, DebtPayment, Transaction
 from backend.models import User
+from backend.services import bills as bills_svc
 from backend.services import categories as categories_svc
 from backend.services import debts as debts_svc
 from backend.services import onboarding as onboarding_svc
@@ -23,6 +24,10 @@ from backend.services.smart_input import interpret
 from .deps import CurrentUser, SessionDep
 from .schemas import (
     AnalyticsOut,
+    BillCreate,
+    BillOut,
+    BillPaidUpdate,
+    BillUpdate,
     BudgetGroupViewOut,
     BudgetLineOut,
     BudgetSet,
@@ -32,6 +37,8 @@ from .schemas import (
     CreatedSubcategoryOut,
     DebtCreate,
     DebtOut,
+    DebtPaymentCreate,
+    DebtPaymentOut,
     DebtUpdate,
     DeleteResultOut,
     GroupDeleteResultOut,
@@ -147,6 +154,7 @@ def _settings_out(user: User) -> SettingsOut:
         morning_hour=s.morning_hour,
         evening_enabled=s.evening_enabled,
         evening_hour=s.evening_hour,
+        reminders_enabled=s.reminders_enabled,
     )
 
 
@@ -172,6 +180,7 @@ async def update_settings(
         morning_hour=body.morning_hour,
         evening_enabled=body.evening_enabled,
         evening_hour=body.evening_hour,
+        reminders_enabled=body.reminders_enabled,
     )
     return _settings_out(updated)
 
@@ -237,10 +246,18 @@ async def budget_overview(
     user: CurrentUser,
     session: SessionDep,
     month: Optional[str] = Query(default=None),
+    article: str = Query(default="expense"),
 ) -> list[BudgetGroupViewOut]:
-    """Полный бюджет каруселью: все расходные категории → все подкатегории (лимит опционален)."""
+    """Полный обзор категорий каруселью: все категории статьи → все подкатегории.
+
+    Для расходов (``article=expense``) — с лимитами (бюджет). Для доходов
+    (``article=income``) лимитов нет: ``limit`` всегда 0, ``spent`` — сумма полученного
+    за месяц по категории.
+    """
+    if article not in ("income", "expense", "debt"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad article")
     year, mon, _ = _parse_month(month)
-    groups = await reports.budget_overview(session, user.id, year, mon)
+    groups = await reports.budget_overview(session, user.id, year, mon, article=article)
     return [
         BudgetGroupViewOut(
             group=g.group,
@@ -677,5 +694,207 @@ async def delete_debt(
     debt = await session.get(Debt, debt_id)
     if debt is None or debt.user_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "debt not found")
+    # Сначала убираем платежи долга (нет каскада FK) — иначе останутся сироты.
+    await session.execute(delete(DebtPayment).where(DebtPayment.debt_id == debt.id))
     await session.delete(debt)
     await session.commit()
+
+
+# ── Возвраты долга частями (S9) ──────────────────────────────────────────
+def _payment_out(p: DebtPayment) -> DebtPaymentOut:
+    return DebtPaymentOut(id=p.id, amount=float(p.amount), on_date=p.on_date)
+
+
+async def _get_owned_debt(session, user, debt_id: int) -> Debt:
+    debt = await session.get(Debt, debt_id)
+    if debt is None or debt.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "debt not found")
+    return debt
+
+
+@router.get("/debts/{debt_id}/payments", response_model=list[DebtPaymentOut])
+async def list_debt_payments(
+    debt_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> list[DebtPaymentOut]:
+    """История возвратов по долгу (свежие сверху)."""
+    await _get_owned_debt(session, user, debt_id)
+    payments = await debts_svc.list_payments(session, debt_id)
+    return [_payment_out(p) for p in payments]
+
+
+@router.post("/debts/{debt_id}/payments", response_model=DebtOut, status_code=201)
+async def add_debt_payment(
+    debt_id: int,
+    body: DebtPaymentCreate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> DebtOut:
+    """Записывает частичный возврат. Возвращает обновлённую карточку долга.
+
+    Сумма возврата не должна превышать остаток (округление до копеек).
+    """
+    debt = await _get_owned_debt(session, user, debt_id)
+    if body.amount <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "amount must be > 0")
+    remaining = round(float(debt.amount) - float(debt.paid), 2)
+    if round(body.amount, 2) > remaining:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "amount exceeds remaining")
+
+    await debts_svc.add_payment(
+        session,
+        debt,
+        amount=Decimal(str(body.amount)),
+        on_date=body.on_date or date.today(),
+    )
+    return _debt_out(debt)
+
+
+@router.delete("/debts/{debt_id}/payments/{payment_id}", response_model=DebtOut)
+async def delete_debt_payment(
+    debt_id: int,
+    payment_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> DebtOut:
+    """Удаляет возврат и пересчитывает остаток/статус. Возвращает карточку долга."""
+    debt = await _get_owned_debt(session, user, debt_id)
+    payment = await session.get(DebtPayment, payment_id)
+    if payment is None or payment.debt_id != debt.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "payment not found")
+    await debts_svc.delete_payment(session, payment, debt)
+    return _debt_out(debt)
+
+
+# ── Обязательные платежи (направление C, S10) ────────────────────────────
+def _bill_out(bill: Bill, category: Category | None, paid: bool) -> BillOut:
+    return BillOut(
+        id=bill.id,
+        title=bill.title,
+        amount=float(bill.amount),
+        due_day=bill.due_day,
+        category_id=bill.category_id,
+        category_name=category.name if category else "—",
+        group=category.group if category else "—",
+        emoji=category.emoji if category else None,
+        note=bill.note,
+        is_active=bill.is_active,
+        paid=paid,
+    )
+
+
+async def _get_expense_category(session, user, category_id: int) -> Category:
+    cat = await session.get(Category, category_id)
+    if cat is None or cat.user_id != user.id or cat.article != "expense":
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "category must be an expense subcategory")
+    return cat
+
+
+async def _get_owned_bill(session, user, bill_id: int) -> Bill:
+    bill = await session.get(Bill, bill_id)
+    if bill is None or bill.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "bill not found")
+    return bill
+
+
+@router.get("/bills", response_model=list[BillOut])
+async def list_bills(
+    user: CurrentUser,
+    session: SessionDep,
+    month: Optional[str] = Query(default=None),
+) -> list[BillOut]:
+    """Обязательные платежи с отметкой оплаты за выбранный месяц (по умолчанию — текущий)."""
+    _, _, period = _parse_month(month)
+    bills = await bills_svc.list_bills(session, user.id, active_only=True)
+    marks = await bills_svc.marks_for_period(session, user.id, period)
+    out: list[BillOut] = []
+    for b in bills:
+        cat = await session.get(Category, b.category_id)
+        out.append(_bill_out(b, cat, b.id in marks))
+    return out
+
+
+@router.post("/bills", response_model=BillOut, status_code=201)
+async def create_bill(
+    body: BillCreate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> BillOut:
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "title is required")
+    if body.amount <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "amount must be > 0")
+    cat = await _get_expense_category(session, user, body.category_id)
+    bill = await bills_svc.create_bill(
+        session,
+        user_id=user.id,
+        title=title,
+        amount=Decimal(str(body.amount)),
+        due_day=body.due_day,
+        category_id=body.category_id,
+        note=(body.note or "").strip() or None,
+    )
+    return _bill_out(bill, cat, paid=False)
+
+
+@router.patch("/bills/{bill_id}", response_model=BillOut)
+async def update_bill(
+    bill_id: int,
+    body: BillUpdate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> BillOut:
+    """Правка платежа: название / сумма / число-срок / категория / заметка / активность."""
+    bill = await _get_owned_bill(session, user, bill_id)
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "title is required")
+        bill.title = title
+    if body.amount is not None:
+        bill.amount = Decimal(str(body.amount))
+    if body.due_day is not None:
+        bill.due_day = body.due_day
+    if body.category_id is not None:
+        await _get_expense_category(session, user, body.category_id)
+        bill.category_id = body.category_id
+    if body.note is not None:
+        bill.note = body.note.strip() or None
+    if body.is_active is not None:
+        bill.is_active = body.is_active
+    await session.commit()
+
+    _, _, period = _parse_month(None)
+    marks = await bills_svc.marks_for_period(session, user.id, period)
+    cat = await session.get(Category, bill.category_id)
+    return _bill_out(bill, cat, bill.id in marks)
+
+
+@router.delete("/bills/{bill_id}", status_code=204)
+async def delete_bill(
+    bill_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> None:
+    """Удаляет платёж и его отметки. Ранее записанные операции остаются в истории."""
+    bill = await _get_owned_bill(session, user, bill_id)
+    await session.execute(delete(BillMark).where(BillMark.bill_id == bill.id))
+    await session.delete(bill)
+    await session.commit()
+
+
+@router.patch("/bills/{bill_id}/paid", response_model=BillOut)
+async def set_bill_paid(
+    bill_id: int,
+    body: BillPaidUpdate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> BillOut:
+    """Ставит/снимает отметку оплаты за месяц. Отметка создаёт/удаляет расходную операцию."""
+    bill = await _get_owned_bill(session, user, bill_id)
+    _, _, period = _parse_month(body.month)
+    await bills_svc.set_paid(session, user.id, bill, period, body.paid)
+    cat = await session.get(Category, bill.category_id)
+    return _bill_out(bill, cat, body.paid)

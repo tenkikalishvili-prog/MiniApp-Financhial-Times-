@@ -10,10 +10,10 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import Debt
+from backend.models import Debt, DebtPayment
 
 # Допустимые направления долга.
 DIRECTIONS = ("owe", "lent")  # owe — я должен; lent — мне должны
@@ -60,3 +60,58 @@ async def create_debt(
     session.add(debt)
     await session.commit()
     return debt
+
+
+# ── Возвраты частями (S9) ────────────────────────────────────────────────
+async def list_payments(session: AsyncSession, debt_id: int) -> list[DebtPayment]:
+    """Все платежи долга — свежие сверху (по дате, затем по id)."""
+    result = await session.execute(
+        select(DebtPayment).where(DebtPayment.debt_id == debt_id)
+    )
+    payments = list(result.scalars().all())
+    payments.sort(key=lambda p: (p.on_date, p.id), reverse=True)
+    return payments
+
+
+async def _recalc_paid(session: AsyncSession, debt: Debt) -> None:
+    """Пересчитывает ``debt.paid`` = сумма платежей и авто-синхронит статус закрытия.
+
+    Возврат до полной суммы → долг авто-закрывается; удаление платежа ниже полной
+    суммы → авто-открывается. Ручной тумблер «возвращён» остаётся для долгов без
+    платежей (напр. прощённых).
+    """
+    total = await session.scalar(
+        select(func.coalesce(func.sum(DebtPayment.amount), 0)).where(
+            DebtPayment.debt_id == debt.id
+        )
+    )
+    debt.paid = Decimal(str(total or 0))
+    debt.is_closed = debt.paid >= debt.amount
+
+
+async def add_payment(
+    session: AsyncSession,
+    debt: Debt,
+    amount: Decimal,
+    on_date: date,
+) -> DebtPayment:
+    """Записывает возврат по долгу и пересчитывает остаток/статус."""
+    payment = DebtPayment(
+        debt_id=debt.id,
+        user_id=debt.user_id,
+        amount=amount,
+        on_date=on_date,
+    )
+    session.add(payment)
+    await session.flush()  # получить id платежа до пересчёта
+    await _recalc_paid(session, debt)
+    await session.commit()
+    return payment
+
+
+async def delete_payment(session: AsyncSession, payment: DebtPayment, debt: Debt) -> None:
+    """Удаляет возврат и пересчитывает остаток/статус долга."""
+    await session.delete(payment)
+    await session.flush()
+    await _recalc_paid(session, debt)
+    await session.commit()

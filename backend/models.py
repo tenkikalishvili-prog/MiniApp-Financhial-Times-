@@ -56,6 +56,8 @@ class User(Base):
     morning_hour: Mapped[int] = mapped_column(Integer, default=9)
     evening_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     evening_hour: Mapped[int] = mapped_column(Integer, default=23)
+    # Напоминания о платежах и долгах (S11): шлются раз в день в утренний час.
+    reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
     categories: Mapped[list[Category]] = relationship(back_populates="user")
     transactions: Mapped[list[Transaction]] = relationship(back_populates="user")
@@ -137,3 +139,69 @@ class Debt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     user: Mapped[User] = relationship()
+
+
+class DebtPayment(Base):
+    """Один возврат по долгу частями (направление C, S9).
+
+    История платежей: каждый частичный возврат — отдельная запись (сумма + дата).
+    ``Debt.paid`` = сумма всех платежей долга (кэш пересчитывается при добавлении/
+    удалении платежа), остаток = ``amount − paid``. Отдельная таблица заводится через
+    ``create_all`` — ALTER-миграция не нужна (целиком новая таблица).
+    """
+
+    __tablename__ = "debt_payments"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    debt_id: Mapped[int] = mapped_column(ForeignKey("debts.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))  # сумма возврата
+    on_date: Mapped[date] = mapped_column(Date)  # дата возврата
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    debt: Mapped[Debt] = relationship()
+
+
+class Bill(Base):
+    """Регулярный обязательный платёж (направление C, S10): аренда, кредит, подписка…
+
+    Календарь ежемесячных обязательств. У платежа — число месяца-срок (``due_day``) и
+    привязка к расходной подкатегории (``category_id``): отметка «оплачено» за месяц
+    создаёт расходную операцию по этой категории (см. ``BillMark``).
+    """
+
+    __tablename__ = "bills"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(128))  # название платежа
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))  # сумма к оплате
+    due_day: Mapped[int] = mapped_column(Integer)  # число месяца-срок (1–31)
+    category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"), index=True)
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    category: Mapped[Category] = relationship()
+
+
+class BillMark(Base):
+    """Отметка оплаты платежа за конкретный месяц (S10).
+
+    Наличие строки = платёж оплачен в этом месяце. ``transaction_id`` — созданная при
+    отметке расходная операция (снятие отметки её удаляет, чтобы не задваивать учёт).
+    """
+
+    __tablename__ = "bill_marks"
+    __table_args__ = (
+        UniqueConstraint("bill_id", "period", name="uq_bill_mark"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    bill_id: Mapped[int] = mapped_column(ForeignKey("bills.id"), index=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    period: Mapped[str] = mapped_column(String(7))  # 'YYYY-MM'
+    transaction_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("transactions.id"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

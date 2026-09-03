@@ -79,6 +79,7 @@ def _ensure_user_columns(conn) -> None:
         "morning_hour": "INTEGER DEFAULT 9",
         "evening_enabled": "BOOLEAN DEFAULT TRUE",
         "evening_hour": "INTEGER DEFAULT 23",
+        "reminders_enabled": "BOOLEAN DEFAULT TRUE",
     }
 
     onboarded_was_missing = "onboarded_at" not in existing
