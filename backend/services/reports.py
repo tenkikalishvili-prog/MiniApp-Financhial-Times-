@@ -14,7 +14,7 @@ from decimal import Decimal
 from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.models import Budget, Category, Transaction
+from backend.models import Budget, Category, Debt, Goal, Transaction
 
 
 def month_bounds(year: int, month: int) -> tuple[date, date]:
@@ -53,6 +53,34 @@ async def month_totals(
         income=totals.get("income", Decimal("0")),
         expense=totals.get("expense", Decimal("0")),
     )
+
+
+async def entity_cash_net(
+    session: AsyncSession, user_id: int, year: int, month: int
+) -> Decimal:
+    """Нетто движения ДС по целям/долгам за месяц: Σ(приток) − Σ(отток).
+
+    ``flow`` заполнен ТОЛЬКО у операций по целям/долгам (у доход/расход — NULL), поэтому
+    фильтр ``flow IS NOT NULL`` берёт ровно их. Питает «остаток» на Главной (деньги на
+    руках): занял/вернули → +, отдал/отложил в цель/дал в долг → −. В доход/расход и
+    аналитику трат эти операции НЕ входят (нет категории).
+    """
+    start, end = month_bounds(year, month)
+    result = await session.execute(
+        select(
+            Transaction.flow,
+            func.coalesce(func.sum(Transaction.amount), 0),
+        )
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.date >= start,
+            Transaction.date < end,
+            Transaction.flow.isnot(None),
+        )
+        .group_by(Transaction.flow)
+    )
+    sums = {row[0]: Decimal(str(row[1])) for row in result.all()}
+    return sums.get("in", Decimal("0")) - sums.get("out", Decimal("0"))
 
 
 @dataclass
@@ -278,7 +306,11 @@ async def recent_transactions(
     stmt = (
         select(Transaction)
         .where(Transaction.user_id == user_id)
-        .options(selectinload(Transaction.category))
+        .options(
+            selectinload(Transaction.category),
+            selectinload(Transaction.goal),
+            selectinload(Transaction.debt),
+        )
         .order_by(Transaction.date.desc(), Transaction.id.desc())
     )
     if year is not None and month is not None:

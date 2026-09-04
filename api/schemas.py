@@ -174,19 +174,30 @@ class CategoryGroupOut(CamelModel):
 class TransactionOut(CamelModel):
     id: int
     article: str
-    category_id: int = Field(serialization_alias="categoryId")
+    # kind — тип движения для рендера: expense | income | goal | debt.
+    kind: str
+    # flow — знак движения ДС для операций по целям/долгам: in | out. NULL у доход/расход.
+    flow: Optional[str] = None
+    category_id: Optional[int] = Field(default=None, serialization_alias="categoryId")
     category_name: str = Field(serialization_alias="categoryName")
     subcategory_name: str = Field(serialization_alias="subcategoryName")
     emoji: Optional[str]
     amount: float
     date: date
     comment: Optional[str]
+    # Привязка к цели/долгу — чтобы из «Истории» открыть карточку.
+    goal_id: Optional[int] = Field(default=None, serialization_alias="goalId")
+    debt_id: Optional[int] = Field(default=None, serialization_alias="debtId")
+    debt_role: Optional[str] = Field(default=None, serialization_alias="debtRole")
 
 
 class TransactionCreate(CamelModel):
+    # ``on_date`` (alias ``date``) намеренно НЕ называется ``date``: одноимённое поле
+    # в связке с ``from __future__ import annotations`` затеняет тип ``date`` собственным
+    # значением по умолчанию, и pydantic резолвит тип в NoneType (см. TransactionUpdate).
     category_id: int = Field(validation_alias="categoryId")
     amount: float
-    date: Optional[date] = None
+    on_date: Optional[date] = Field(default=None, validation_alias="date")
     comment: Optional[str] = None
 
 
@@ -234,6 +245,8 @@ class DebtOut(CamelModel):
     paid: float                      # погашено (S9; пока 0)
     remaining: float                 # остаток = amount − paid
     due_date: Optional[date] = Field(default=None, serialization_alias="dueDate")
+    # Дата движения тела (когда деньги перешли) — операция-тело в реестре.
+    started_on: Optional[date] = Field(default=None, serialization_alias="startedOn")
     note: Optional[str] = None
     is_closed: bool = Field(serialization_alias="isClosed")
 
@@ -244,6 +257,8 @@ class DebtCreate(CamelModel):
     amount: float
     # ``due_date`` (alias ``dueDate``) намеренно НЕ называется ``date`` — см. TransactionCreate.
     due_date: Optional[date] = Field(default=None, validation_alias="dueDate")
+    # Дата движения тела долга (по умолчанию сегодня). Старый долг → прошлая дата.
+    started_on: Optional[date] = Field(default=None, validation_alias="startedOn")
     note: Optional[str] = None
 
 
@@ -254,6 +269,7 @@ class DebtUpdate(CamelModel):
     counterparty: Optional[str] = None
     amount: Optional[float] = Field(default=None, gt=0)
     due_date: Optional[date] = Field(default=None, validation_alias="dueDate")
+    started_on: Optional[date] = Field(default=None, validation_alias="startedOn")
     note: Optional[str] = None
     is_closed: Optional[bool] = Field(default=None, validation_alias="isClosed")
 
@@ -268,6 +284,47 @@ class DebtPaymentOut(CamelModel):
 class DebtPaymentCreate(CamelModel):
     amount: float = Field(gt=0)
     # ``on_date`` (alias ``date``) намеренно НЕ называется ``date`` — см. TransactionCreate.
+    on_date: Optional[date] = Field(default=None, validation_alias="date")
+
+
+# ── Финансовые цели (направление D, S13) ─────────────────────────────────
+class GoalOut(CamelModel):
+    id: int
+    title: str                       # на что копим
+    target_amount: float = Field(serialization_alias="targetAmount")  # сколько нужно
+    saved: float                     # накоплено (сумма пополнений)
+    remaining: float                 # остаток = target − saved
+    deadline: Optional[date] = None  # срок цели
+    note: Optional[str] = None
+    is_done: bool = Field(serialization_alias="isDone")
+
+
+class GoalCreate(CamelModel):
+    title: str
+    target_amount: float = Field(gt=0, validation_alias="targetAmount")
+    deadline: Optional[date] = None
+    note: Optional[str] = None
+
+
+class GoalUpdate(CamelModel):
+    """Частичное изменение цели. Любое поле опционально — меняем присланные."""
+
+    title: Optional[str] = None
+    target_amount: Optional[float] = Field(default=None, gt=0, validation_alias="targetAmount")
+    deadline: Optional[date] = None
+    note: Optional[str] = None
+    is_done: Optional[bool] = Field(default=None, validation_alias="isDone")
+
+
+class GoalContributionOut(CamelModel):
+    id: int
+    amount: float
+    # сериализуем как ``date`` наружу; внутри — on_date (см. TransactionCreate).
+    on_date: date = Field(serialization_alias="date")
+
+
+class GoalContributionCreate(CamelModel):
+    amount: float = Field(gt=0)
     on_date: Optional[date] = Field(default=None, validation_alias="date")
 
 

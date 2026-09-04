@@ -96,23 +96,53 @@ class Budget(Base):
 
 
 class Transaction(Base):
-    """Факт: одна операция (доход/расход/долг)."""
+    """Факт: одна операция — единый реестр ВСЕХ движений ДС.
+
+    Кроме обычных доход/расход (привязка к ``category_id``) здесь же живут движения
+    по целям и долгам (направление D, единый реестр):
+    - **пополнение цели** — ``goal_id`` задан, категории нет, ``flow='out'``;
+    - **движение по долгу** — ``debt_id`` задан, категории нет, ``debt_role`` =
+      ``principal`` (тело долга: занял/дал) либо ``payment`` (возврат), ``flow`` —
+      направление ДС (``in`` приток / ``out`` отток).
+
+    ``flow`` заполняется ТОЛЬКО у операций по целям/долгам (у доход/расход знак ясен
+    из статьи). «Остаток» = доход − расход ± нетто этих операций; в аналитику трат и в
+    дневной лимит цели/долги НЕ попадают (у них нет категории). Один источник правды:
+    прогресс цели (``Goal.saved``) и долга (``Debt.paid``) считается из этих операций.
+    """
 
     __tablename__ = "transactions"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     date: Mapped[date] = mapped_column(Date, default=date.today)
-    article: Mapped[str] = mapped_column(String(16))
-    category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"), index=True)
+    article: Mapped[str] = mapped_column(String(16))  # income | expense | debt | goal
+    # Категория есть у обычных доход/расход; у операций по целям/долгам — NULL.
+    category_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("categories.id"), index=True, nullable=True
+    )
     amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    # источник ввода: manual_app | bot_buttons | bot_text | bot_voice | bot_photo
+    # источник ввода: manual_app | bot_buttons | bot_text | bot_voice | bot_photo | bill
     source: Mapped[str] = mapped_column(String(24), default="bot_buttons")
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
+    # ── Привязка к цели/долгу (единый реестр) ────────────────────────────
+    goal_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("goals.id"), index=True, nullable=True
+    )
+    debt_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("debts.id"), index=True, nullable=True
+    )
+    # Для операций по долгу: principal (тело — занял/дал) | payment (возврат/платёж).
+    debt_role: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    # Направление ДС для операций по целям/долгам: in (приток) | out (отток). NULL у доход/расход.
+    flow: Mapped[Optional[str]] = mapped_column(String(3), nullable=True)
+
     user: Mapped[User] = relationship(back_populates="transactions")
-    category: Mapped[Category] = relationship()
+    category: Mapped[Optional[Category]] = relationship()
+    goal: Mapped[Optional["Goal"]] = relationship()
+    debt: Mapped[Optional["Debt"]] = relationship()
 
 
 class Debt(Base):
@@ -130,10 +160,13 @@ class Debt(Base):
     # owe  → я должен кому-то;  lent → мне должны.
     direction: Mapped[str] = mapped_column(String(8))
     counterparty: Mapped[str] = mapped_column(String(128))  # кому / кто
-    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))  # изначальная сумма долга
-    # Погашено на данный момент (наполнится в S9). Остаток = amount − paid.
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))  # изначальная сумма долга (тело)
+    # Погашено на данный момент = сумма операций-возвратов. Остаток = amount − paid.
     paid: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
     due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)  # срок возврата
+    # Дата, когда деньги реально перешли (для операции-тела в реестре). Старый долг →
+    # прошлая дата, и текущий месяц не раздувается. NULL до бэкфилла.
+    started_on: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_closed: Mapped[bool] = mapped_column(Boolean, default=False)  # закрыт (возвращён)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
@@ -142,12 +175,12 @@ class Debt(Base):
 
 
 class DebtPayment(Base):
-    """Один возврат по долгу частями (направление C, S9).
+    """LEGACY (S9): один возврат по долгу. Больше НЕ используется для новых записей.
 
-    История платежей: каждый частичный возврат — отдельная запись (сумма + дата).
-    ``Debt.paid`` = сумма всех платежей долга (кэш пересчитывается при добавлении/
-    удалении платежа), остаток = ``amount − paid``. Отдельная таблица заводится через
-    ``create_all`` — ALTER-миграция не нужна (целиком новая таблица).
+    С переходом на единый реестр «Операции» возвраты долга — это операции
+    (``Transaction`` с ``debt_id`` и ``debt_role='payment'``). Таблица сохраняется
+    только для разового БЭКФИЛЛА старых данных в реестр (см. ``db._backfill_ledger``);
+    после успешной миграции — пустая, не пишется.
     """
 
     __tablename__ = "debt_payments"
@@ -160,6 +193,33 @@ class DebtPayment(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     debt: Mapped[Debt] = relationship()
+
+
+class Goal(Base):
+    """Финансовая цель / накопление (направление D, S13).
+
+    Отдельная сущность-карточка: на что копим, сколько нужно (``target_amount``),
+    к какому сроку (``deadline``). ``saved`` — кэш суммы всех пополнений (см.
+    ``GoalContribution``), пересчитывается при добавлении/удалении пополнения;
+    остаток = ``target_amount − saved``. Нужный ежемесячный темп фронт считает
+    из остатка и срока. Пополнения хранятся внутри цели и НЕ создают расходную
+    операцию (это откладывание, а не трата) — так же, как возвраты долга.
+    """
+
+    __tablename__ = "goals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    title: Mapped[str] = mapped_column(String(128))  # на что копим
+    target_amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))  # сколько нужно всего
+    # Накоплено на данный момент = сумма пополнений. Остаток = target_amount − saved.
+    saved: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    deadline: Mapped[Optional[date]] = mapped_column(Date, nullable=True)  # срок цели
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_done: Mapped[bool] = mapped_column(Boolean, default=False)  # цель достигнута
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    user: Mapped[User] = relationship()
 
 
 class Bill(Base):

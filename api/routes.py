@@ -9,11 +9,12 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import delete, select
 
-from backend.models import Bill, BillMark, Budget, Category, Debt, DebtPayment, Transaction
-from backend.models import User
+from backend.models import Bill, BillMark, Budget, Category, Debt, Transaction
+from backend.models import Goal, User
 from backend.services import bills as bills_svc
 from backend.services import categories as categories_svc
 from backend.services import debts as debts_svc
+from backend.services import goals as goals_svc
 from backend.services import onboarding as onboarding_svc
 from backend.services import reports
 from backend.services import settings as settings_svc
@@ -41,6 +42,11 @@ from .schemas import (
     DebtPaymentOut,
     DebtUpdate,
     DeleteResultOut,
+    GoalContributionCreate,
+    GoalContributionOut,
+    GoalCreate,
+    GoalOut,
+    GoalUpdate,
     GroupDeleteResultOut,
     GroupRename,
     GroupRenameOut,
@@ -79,16 +85,42 @@ def _parse_month(month: Optional[str]) -> tuple[int, int, str]:
 
 
 def _tx_out(t: Transaction) -> TransactionOut:
+    """Операция для списков. Доход/расход — по категории; цели/долги — по привязке.
+
+    У операций по целям/долгам категории нет: подставляем имя цели/контрагента и иконку
+    (🎯/🤝), знак движения берётся фронтом из ``flow``.
+    """
+    if t.goal_id is not None:
+        kind = "goal"
+        name = ""
+        sub = (t.goal.title if t.goal else None) or t.description or "Цель"
+        emoji = "🎯"
+    elif t.debt_id is not None:
+        kind = "debt"
+        name = ""
+        sub = (t.debt.counterparty if t.debt else None) or t.description or "Долг"
+        emoji = "🤝"
+    else:
+        kind = t.article
+        name = t.category.group if t.category else ""
+        sub = t.category.name if t.category else ""
+        emoji = t.category.emoji if t.category else None
+
     return TransactionOut(
         id=t.id,
         article=t.article,
+        kind=kind,
+        flow=t.flow,
         category_id=t.category_id,
-        category_name=t.category.group if t.category else "",
-        subcategory_name=t.category.name if t.category else "",
-        emoji=t.category.emoji if t.category else None,
+        category_name=name,
+        subcategory_name=sub,
+        emoji=emoji,
         amount=float(t.amount),
         date=t.date,
         comment=t.description,
+        goal_id=t.goal_id,
+        debt_id=t.debt_id,
+        debt_role=t.debt_role,
     )
 
 
@@ -103,6 +135,7 @@ def _debt_out(d: Debt) -> DebtOut:
         paid=paid,
         remaining=round(amount - paid, 2),
         due_date=d.due_date,
+        started_on=d.started_on,
         note=d.note,
         is_closed=d.is_closed,
     )
@@ -196,6 +229,8 @@ async def overview(
 
     totals = await reports.month_totals(session, user.id, year, mon)
     daily = await get_daily_limit(session, user.id)
+    # Движения по целям/долгам входят в «остаток» (деньги на руках), но НЕ в доход/расход.
+    entity_net = await reports.entity_cash_net(session, user.id, year, mon)
 
     lines = await reports.budget_lines(
         session, user.id, year, mon, group=DISCRETIONARY_GROUP
@@ -206,7 +241,7 @@ async def overview(
         month=month_str,
         income=float(totals.income),
         expense=float(totals.expense),
-        remaining=float(totals.income - totals.expense),
+        remaining=float(totals.income - totals.expense + entity_net),
         daily_limit=float(daily.per_day),
         days_left=daily.days_left,
         has_budget=daily.has_budget,
@@ -521,7 +556,7 @@ async def list_transactions(
     year = mon = None
     if month:
         year, mon, _ = _parse_month(month)
-    if article is not None and article not in ("income", "expense", "debt"):
+    if article is not None and article not in ("income", "expense", "debt", "goal"):
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "bad article")
     rows = await reports.recent_transactions(
         session,
@@ -557,7 +592,7 @@ async def create_transaction(
         amount=Decimal(str(body.amount)),
         source="manual_app",
         description=body.comment,
-        on_date=body.date,
+        on_date=body.on_date,
     )
     # подгружаем категорию для ответа
     tx.category = category
@@ -579,8 +614,13 @@ async def update_transaction(
     tx = await session.get(Transaction, tx_id)
     if tx is None or tx.user_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "transaction not found")
+    # Операции по целям/долгам редактируются в своих карточках (там пересчёт прогресса).
+    if tx.goal_id is not None or tx.debt_id is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "edit goal/debt operations on their card"
+        )
 
-    category = await session.get(Category, tx.category_id)
+    category = await session.get(Category, tx.category_id) if tx.category_id else None
     if body.category_id is not None and body.category_id != tx.category_id:
         category = await session.get(Category, body.category_id)
         if category is None or category.user_id != user.id:
@@ -609,6 +649,22 @@ async def delete_transaction(
     tx = await session.get(Transaction, tx_id)
     if tx is None or tx.user_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "transaction not found")
+
+    # Операции по целям/долгам — удаляем с пересчётом прогресса привязанной сущности.
+    if tx.goal_id is not None:
+        goal = await session.get(Goal, tx.goal_id)
+        await goals_svc.delete_contribution(session, tx, goal)
+        return
+    if tx.debt_id is not None:
+        if tx.debt_role == "principal":
+            # Тело долга нельзя удалить из истории — только вместе с карточкой долга.
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "delete the debt card to remove its principal"
+            )
+        debt = await session.get(Debt, tx.debt_id)
+        await debts_svc.delete_payment(session, tx, debt)
+        return
+
     await session.delete(tx)
     await session.commit()
 
@@ -647,6 +703,7 @@ async def create_debt(
         amount=Decimal(str(body.amount)),
         due_date=body.due_date,
         note=(body.note or "").strip() or None,
+        started_on=body.started_on,
     )
     return _debt_out(debt)
 
@@ -676,11 +733,17 @@ async def update_debt(
         debt.amount = Decimal(str(body.amount))
     if body.due_date is not None:
         debt.due_date = body.due_date
+    if body.started_on is not None:
+        debt.started_on = body.started_on
     if body.note is not None:
         debt.note = body.note.strip() or None
     if body.is_closed is not None:
         debt.is_closed = body.is_closed
 
+    # Приводим операцию-тело в реестре к новым сумме/дате/направлению.
+    await debts_svc.sync_principal(session, debt)
+    # Сумма/направление могли поменяться → пересчитываем статус закрытия.
+    await debts_svc._recalc_paid(session, debt)
     await session.commit()
     return _debt_out(debt)
 
@@ -694,15 +757,15 @@ async def delete_debt(
     debt = await session.get(Debt, debt_id)
     if debt is None or debt.user_id != user.id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "debt not found")
-    # Сначала убираем платежи долга (нет каскада FK) — иначе останутся сироты.
-    await session.execute(delete(DebtPayment).where(DebtPayment.debt_id == debt.id))
+    # Сначала убираем все операции долга (тело + возвраты) — нет каскада FK.
+    await debts_svc.delete_debt_ledger(session, debt.id)
     await session.delete(debt)
     await session.commit()
 
 
-# ── Возвраты долга частями (S9) ──────────────────────────────────────────
-def _payment_out(p: DebtPayment) -> DebtPaymentOut:
-    return DebtPaymentOut(id=p.id, amount=float(p.amount), on_date=p.on_date)
+# ── Возвраты долга частями (операции реестра) ─────────────────────────────
+def _payment_out(p: Transaction) -> DebtPaymentOut:
+    return DebtPaymentOut(id=p.id, amount=float(p.amount), on_date=p.date)
 
 
 async def _get_owned_debt(session, user, debt_id: int) -> Debt:
@@ -760,11 +823,172 @@ async def delete_debt_payment(
 ) -> DebtOut:
     """Удаляет возврат и пересчитывает остаток/статус. Возвращает карточку долга."""
     debt = await _get_owned_debt(session, user, debt_id)
-    payment = await session.get(DebtPayment, payment_id)
-    if payment is None or payment.debt_id != debt.id:
+    payment = await session.get(Transaction, payment_id)
+    if (
+        payment is None
+        or payment.debt_id != debt.id
+        or payment.debt_role != "payment"
+    ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "payment not found")
     await debts_svc.delete_payment(session, payment, debt)
     return _debt_out(debt)
+
+
+# ── Финансовые цели (направление D, S13) ─────────────────────────────────
+def _goal_out(g: Goal) -> GoalOut:
+    target = float(g.target_amount)
+    saved = float(g.saved)
+    return GoalOut(
+        id=g.id,
+        title=g.title,
+        target_amount=target,
+        saved=saved,
+        remaining=round(target - saved, 2),
+        deadline=g.deadline,
+        note=g.note,
+        is_done=g.is_done,
+    )
+
+
+def _contribution_out(c: Transaction) -> GoalContributionOut:
+    return GoalContributionOut(id=c.id, amount=float(c.amount), on_date=c.date)
+
+
+async def _get_owned_goal(session, user, goal_id: int) -> Goal:
+    goal = await session.get(Goal, goal_id)
+    if goal is None or goal.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "goal not found")
+    return goal
+
+
+@router.get("/goals", response_model=list[GoalOut])
+async def list_goals(
+    user: CurrentUser,
+    session: SessionDep,
+    include_done: bool = Query(False, alias="includeDone"),
+) -> list[GoalOut]:
+    """Цели пользователя (по умолчанию — только активные)."""
+    goals = await goals_svc.list_goals(session, user.id, include_done=include_done)
+    return [_goal_out(g) for g in goals]
+
+
+@router.post("/goals", response_model=GoalOut, status_code=201)
+async def create_goal(
+    body: GoalCreate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> GoalOut:
+    title = body.title.strip()
+    if not title:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "title is required")
+    if body.target_amount <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "targetAmount must be > 0")
+
+    goal = await goals_svc.create_goal(
+        session,
+        user_id=user.id,
+        title=title,
+        target_amount=Decimal(str(body.target_amount)),
+        deadline=body.deadline,
+        note=(body.note or "").strip() or None,
+    )
+    return _goal_out(goal)
+
+
+@router.patch("/goals/{goal_id}", response_model=GoalOut)
+async def update_goal(
+    goal_id: int,
+    body: GoalUpdate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> GoalOut:
+    """Правка цели: название / сумма / срок / заметка / статус достижения."""
+    goal = await _get_owned_goal(session, user, goal_id)
+
+    if body.title is not None:
+        title = body.title.strip()
+        if not title:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "title is required")
+        goal.title = title
+    if body.target_amount is not None:
+        goal.target_amount = Decimal(str(body.target_amount))
+    if body.deadline is not None:
+        goal.deadline = body.deadline
+    if body.note is not None:
+        goal.note = body.note.strip() or None
+    if body.is_done is not None:
+        goal.is_done = body.is_done
+
+    await session.commit()
+    return _goal_out(goal)
+
+
+@router.delete("/goals/{goal_id}", status_code=204)
+async def delete_goal(
+    goal_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> None:
+    goal = await _get_owned_goal(session, user, goal_id)
+    # Сначала убираем операции-пополнения (нет каскада FK) — иначе останутся сироты.
+    await session.execute(delete(Transaction).where(Transaction.goal_id == goal.id))
+    await session.delete(goal)
+    await session.commit()
+
+
+@router.get("/goals/{goal_id}/contributions", response_model=list[GoalContributionOut])
+async def list_goal_contributions(
+    goal_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> list[GoalContributionOut]:
+    """История пополнений цели (свежие сверху)."""
+    await _get_owned_goal(session, user, goal_id)
+    items = await goals_svc.list_contributions(session, goal_id)
+    return [_contribution_out(c) for c in items]
+
+
+@router.post("/goals/{goal_id}/contributions", response_model=GoalOut, status_code=201)
+async def add_goal_contribution(
+    goal_id: int,
+    body: GoalContributionCreate,
+    user: CurrentUser,
+    session: SessionDep,
+) -> GoalOut:
+    """Записывает пополнение. Возвращает обновлённую карточку цели.
+
+    Сумма пополнения не должна превышать остаток (округление до копеек).
+    """
+    goal = await _get_owned_goal(session, user, goal_id)
+    if body.amount <= 0:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "amount must be > 0")
+    remaining = round(float(goal.target_amount) - float(goal.saved), 2)
+    if round(body.amount, 2) > remaining:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "amount exceeds remaining")
+
+    await goals_svc.add_contribution(
+        session,
+        goal,
+        amount=Decimal(str(body.amount)),
+        on_date=body.on_date or date.today(),
+    )
+    return _goal_out(goal)
+
+
+@router.delete("/goals/{goal_id}/contributions/{contribution_id}", response_model=GoalOut)
+async def delete_goal_contribution(
+    goal_id: int,
+    contribution_id: int,
+    user: CurrentUser,
+    session: SessionDep,
+) -> GoalOut:
+    """Удаляет пополнение и пересчитывает накопленное/статус. Возвращает карточку цели."""
+    goal = await _get_owned_goal(session, user, goal_id)
+    item = await session.get(Transaction, contribution_id)
+    if item is None or item.goal_id != goal.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "contribution not found")
+    await goals_svc.delete_contribution(session, item, goal)
+    return _goal_out(goal)
 
 
 # ── Обязательные платежи (направление C, S10) ────────────────────────────
