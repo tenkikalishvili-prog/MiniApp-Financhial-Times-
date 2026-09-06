@@ -73,14 +73,23 @@ class OverviewOut(CamelModel):
     top_spend: list[TopSpendOut] = Field(serialization_alias="topSpend")
 
 
-# ── Аналитика (donut) ────────────────────────────────────────────────────
+# ── Аналитика (donut + drill-down по подкатегориям) ──────────────────────
+class SubSliceOut(CamelModel):
+    name: str
+    emoji: Optional[str]
+    value: float
+
+
 class SliceOut(CamelModel):
     name: str
+    emoji: Optional[str]
     value: float
+    subcategories: list[SubSliceOut] = []
 
 
 class AnalyticsOut(CamelModel):
     month: str
+    article: str  # expense | income
     total: float
     slices: list[SliceOut]
 

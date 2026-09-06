@@ -56,6 +56,7 @@ from .schemas import (
     SettingsOut,
     SettingsUpdate,
     SliceOut,
+    SubSliceOut,
     SmartParseIn,
     SmartParseOut,
     SubcategoryCreate,
@@ -258,20 +259,35 @@ async def overview(
     )
 
 
-# ── Аналитика (donut) ────────────────────────────────────────────────────
+# ── Аналитика (donut + drill-down) ───────────────────────────────────────
 @router.get("/analytics", response_model=AnalyticsOut)
 async def analytics(
     user: CurrentUser,
     session: SessionDep,
     month: Optional[str] = Query(default=None),
+    article: str = Query(default="expense"),
 ) -> AnalyticsOut:
+    if article not in ("expense", "income"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "article must be expense or income")
     year, mon, month_str = _parse_month(month)
-    groups = await reports.expense_by_group(session, user.id, year, mon)
+    groups = await reports.breakdown_by_group(session, user.id, year, mon, article)
     total = sum((g.amount for g in groups), Decimal("0"))
     return AnalyticsOut(
         month=month_str,
+        article=article,
         total=float(total),
-        slices=[SliceOut(name=g.group, value=float(g.amount)) for g in groups],
+        slices=[
+            SliceOut(
+                name=g.group,
+                emoji=g.emoji,
+                value=float(g.amount),
+                subcategories=[
+                    SubSliceOut(name=s.name, emoji=s.emoji, value=float(s.amount))
+                    for s in g.subcategories
+                ],
+            )
+            for g in groups
+        ],
     )
 
 

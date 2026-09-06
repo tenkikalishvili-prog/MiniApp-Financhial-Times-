@@ -84,19 +84,35 @@ async def entity_cash_net(
 
 
 @dataclass
-class GroupSlice:
-    group: str
+class SubSlice:
+    name: str
+    emoji: str | None
     amount: Decimal
 
 
-async def expense_by_group(
-    session: AsyncSession, user_id: int, year: int, month: int
-) -> list[GroupSlice]:
-    """Расходы за месяц, сгруппированные по категории (для donut). По убыванию."""
+@dataclass
+class GroupBreakdown:
+    group: str
+    emoji: str | None
+    amount: Decimal
+    subcategories: list[SubSlice]
+
+
+async def breakdown_by_group(
+    session: AsyncSession, user_id: int, year: int, month: int, article: str = "expense"
+) -> list[GroupBreakdown]:
+    """Расходы/доходы за месяц: группа → подкатегории с суммами (для donut + drill-down).
+
+    Одним запросом берём суммы по каждой подкатегории (уровень ``Category``), затем в
+    Python сворачиваем в группы. Группы и подкатегории сортируем по убыванию суммы;
+    эмодзи группы — от подкатегории с наибольшей суммой в ней.
+    """
     start, end = month_bounds(year, month)
     result = await session.execute(
         select(
             Category.group,
+            Category.name,
+            Category.emoji,
             func.coalesce(func.sum(Transaction.amount), 0),
         )
         .join(Category, Category.id == Transaction.category_id)
@@ -104,12 +120,29 @@ async def expense_by_group(
             Transaction.user_id == user_id,
             Transaction.date >= start,
             Transaction.date < end,
-            Transaction.article == "expense",
+            Transaction.article == article,
         )
-        .group_by(Category.group)
+        .group_by(Category.group, Category.name, Category.emoji)
         .order_by(func.sum(Transaction.amount).desc())
     )
-    return [GroupSlice(group=row[0], amount=Decimal(str(row[1]))) for row in result.all()]
+
+    groups: list[GroupBreakdown] = []
+    index: dict[str, GroupBreakdown] = {}
+    for group, name, emoji, amount_raw in result.all():
+        amount = Decimal(str(amount_raw))
+        if amount <= 0:  # пропускаем подкатегории без движений за месяц
+            continue
+        view = index.get(group)
+        if view is None:
+            # строки уже по убыванию суммы → первая для группы даёт её эмодзи-«лицо»
+            view = GroupBreakdown(group=group, emoji=emoji, amount=Decimal("0"), subcategories=[])
+            index[group] = view
+            groups.append(view)
+        view.subcategories.append(SubSlice(name=name, emoji=emoji, amount=amount))
+        view.amount += amount
+
+    groups.sort(key=lambda g: g.amount, reverse=True)
+    return groups
 
 
 @dataclass
