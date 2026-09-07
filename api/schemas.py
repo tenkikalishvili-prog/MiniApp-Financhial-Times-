@@ -111,6 +111,9 @@ class BudgetSubOut(CamelModel):
     emoji: Optional[str]
     spent: float
     limit: float
+    # Плановый доход для платёжного календаря (S16) — значимо только для income-подкатегорий.
+    expected_day: Optional[int] = Field(default=None, serialization_alias="expectedDay")
+    expected_amount: Optional[float] = Field(default=None, serialization_alias="expectedAmount")
 
 
 class BudgetGroupViewOut(CamelModel):
@@ -124,6 +127,14 @@ class BudgetGroupViewOut(CamelModel):
 # ── Переименование подкатегории ───────────────────────────────────────────
 class CategoryRename(CamelModel):
     name: str
+    # Плановый доход (S16) — только для income-подкатегорий. Присланы (в т.ч. null)
+    # ⇒ обновляем; отсутствуют ⇒ не трогаем (различаем по model_fields_set в роуте).
+    expected_day: Optional[int] = Field(
+        default=None, ge=1, le=31, validation_alias="expectedDay"
+    )
+    expected_amount: Optional[float] = Field(
+        default=None, ge=0, validation_alias="expectedAmount"
+    )
 
 
 # ── Переименование категории (группы) ─────────────────────────────────────
@@ -258,6 +269,8 @@ class DebtOut(CamelModel):
     started_on: Optional[date] = Field(default=None, serialization_alias="startedOn")
     note: Optional[str] = None
     is_closed: bool = Field(serialization_alias="isClosed")
+    # Платёжный календарь (S16): ручной перенос между отрезками (1 | 2 | null).
+    segment_override: Optional[int] = Field(default=None, serialization_alias="segmentOverride")
 
 
 class DebtCreate(CamelModel):
@@ -281,6 +294,9 @@ class DebtUpdate(CamelModel):
     started_on: Optional[date] = Field(default=None, validation_alias="startedOn")
     note: Optional[str] = None
     is_closed: Optional[bool] = Field(default=None, validation_alias="isClosed")
+    # Перенос между отрезками платёжного календаря (S16): 1 | 2 | null. Различаем
+    # «не прислано» и «null» через model_fields_set в роуте.
+    segment_override: Optional[int] = Field(default=None, validation_alias="segmentOverride")
 
 
 class DebtPaymentOut(CamelModel):
@@ -350,6 +366,8 @@ class BillOut(CamelModel):
     note: Optional[str] = None
     is_active: bool = Field(serialization_alias="isActive")
     paid: bool  # оплачен ли за выбранный месяц
+    # Платёжный календарь (S16): ручной перенос между отрезками (1 | 2 | null).
+    segment_override: Optional[int] = Field(default=None, serialization_alias="segmentOverride")
 
 
 class BillCreate(CamelModel):
@@ -367,8 +385,66 @@ class BillUpdate(CamelModel):
     category_id: Optional[int] = Field(default=None, validation_alias="categoryId")
     note: Optional[str] = None
     is_active: Optional[bool] = Field(default=None, validation_alias="isActive")
+    # Перенос между отрезками платёжного календаря (S16): 1 | 2 | null. Различаем
+    # «не прислано» и «null» через model_fields_set в роуте.
+    segment_override: Optional[int] = Field(default=None, validation_alias="segmentOverride")
 
 
 class BillPaidUpdate(CamelModel):
     month: str          # 'YYYY-MM'
     paid: bool
+
+
+# ── Платёжный календарь (направление D, S16) ─────────────────────────────
+class CashflowItemOut(CamelModel):
+    """Одно обязательство к оплате (платёж или долг) внутри корзины/отрезка."""
+
+    kind: str                        # 'bill' | 'debt'
+    id: int
+    title: str
+    emoji: Optional[str] = None
+    day: int                         # число месяца-срок (1–31, склампленное)
+    amount: float
+    category_name: Optional[str] = Field(default=None, serialization_alias="categoryName")
+    counterparty: Optional[str] = None
+    overridden: bool = False         # перенесён вручную в этот отрезок
+
+
+class CashflowIncomeOut(CamelModel):
+    """Плановый доход (income-подкатегория с датой и суммой)."""
+
+    name: str
+    group: str
+    emoji: Optional[str] = None
+    day: int
+    amount: float
+
+
+class CashflowBucketOut(CamelModel):
+    """Корзина «Просрочено» — сумма и список позиций."""
+
+    total: float
+    items: list[CashflowItemOut]
+
+
+class CashflowSegmentOut(CamelModel):
+    """Отрезок месяца (до G / после G) с покрытием доходом."""
+
+    index: int                       # 1 | 2
+    label: str
+    boundary_day: Optional[int] = Field(default=None, serialization_alias="boundaryDay")
+    expected_income: float = Field(serialization_alias="expectedIncome")
+    obligations: float               # сумма обязательств отрезка
+    coverage: float                  # остаток = доход − обязательства (может быть < 0)
+    items: list[CashflowItemOut]
+
+
+class CashflowPlanOut(CamelModel):
+    """Ответ ``GET /api/cashflow-plan`` — расчёт для текущего месяца."""
+
+    month: str                       # 'YYYY-MM'
+    today: date
+    boundary_day: Optional[int] = Field(default=None, serialization_alias="boundaryDay")
+    incomes: list[CashflowIncomeOut]
+    overdue: CashflowBucketOut
+    segments: list[CashflowSegmentOut]

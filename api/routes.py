@@ -12,6 +12,7 @@ from sqlalchemy import delete, select
 from backend.models import Bill, BillMark, Budget, Category, Debt, Transaction
 from backend.models import Goal, User
 from backend.services import bills as bills_svc
+from backend.services import cashflow as cashflow_svc
 from backend.services import categories as categories_svc
 from backend.services import debts as debts_svc
 from backend.services import goals as goals_svc
@@ -30,6 +31,11 @@ from .schemas import (
     BillPaidUpdate,
     BillUpdate,
     BudgetGroupViewOut,
+    CashflowBucketOut,
+    CashflowIncomeOut,
+    CashflowItemOut,
+    CashflowPlanOut,
+    CashflowSegmentOut,
     BudgetLineOut,
     BudgetSet,
     BudgetSubOut,
@@ -139,6 +145,7 @@ def _debt_out(d: Debt) -> DebtOut:
         started_on=d.started_on,
         note=d.note,
         is_closed=d.is_closed,
+        segment_override=d.segment_override,
     )
 
 
@@ -322,6 +329,8 @@ async def budget_overview(
                     emoji=s.emoji,
                     spent=float(s.spent),
                     limit=float(s.limit),
+                    expected_day=s.expected_day,
+                    expected_amount=float(s.expected_amount) if s.expected_amount is not None else None,
                 )
                 for s in g.subcategories
             ],
@@ -526,6 +535,22 @@ async def rename_category(
         updated = await categories_svc.rename_subcategory(session, category, body.name)
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+
+    # Плановый доход (S16): поля значимы только для income. Присланы (в т.ч. null)
+    # ⇒ обновляем; отсутствуют ⇒ не трогаем (различаем по model_fields_set).
+    fields = body.model_fields_set
+    if "expected_day" in fields or "expected_amount" in fields:
+        if category.article != "income":
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST, "expected income fields valid only for income"
+            )
+        if "expected_day" in fields:
+            category.expected_day = body.expected_day
+        if "expected_amount" in fields:
+            category.expected_amount = (
+                Decimal(str(body.expected_amount)) if body.expected_amount is not None else None
+            )
+        await session.commit()
     return SubcategoryOut(id=updated.id, name=updated.name, emoji=updated.emoji)
 
 
@@ -755,6 +780,8 @@ async def update_debt(
         debt.note = body.note.strip() or None
     if body.is_closed is not None:
         debt.is_closed = body.is_closed
+    if "segment_override" in body.model_fields_set:
+        debt.segment_override = _valid_segment(body.segment_override)
 
     # Приводим операцию-тело в реестре к новым сумме/дате/направлению.
     await debts_svc.sync_principal(session, debt)
@@ -1021,6 +1048,7 @@ def _bill_out(bill: Bill, category: Category | None, paid: bool) -> BillOut:
         note=bill.note,
         is_active=bill.is_active,
         paid=paid,
+        segment_override=bill.segment_override,
     )
 
 
@@ -1104,6 +1132,8 @@ async def update_bill(
         bill.note = body.note.strip() or None
     if body.is_active is not None:
         bill.is_active = body.is_active
+    if "segment_override" in body.model_fields_set:
+        bill.segment_override = _valid_segment(body.segment_override)
     await session.commit()
 
     _, _, period = _parse_month(None)
@@ -1138,3 +1168,62 @@ async def set_bill_paid(
     await bills_svc.set_paid(session, user.id, bill, period, body.paid)
     cat = await session.get(Category, bill.category_id)
     return _bill_out(bill, cat, body.paid)
+
+
+# ── Платёжный календарь (направление D, S16) ─────────────────────────────
+def _valid_segment(value: Optional[int]) -> Optional[int]:
+    """Проверяет segment_override: допустимо 1, 2 или None (авто)."""
+    if value is not None and value not in (1, 2):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "segmentOverride must be 1, 2 or null")
+    return value
+
+
+def _cf_item_out(it: cashflow_svc.CashflowItem) -> CashflowItemOut:
+    return CashflowItemOut(
+        kind=it.kind,
+        id=it.id,
+        title=it.title,
+        emoji=it.emoji,
+        day=it.day,
+        amount=float(it.amount),
+        category_name=it.category_name,
+        counterparty=it.counterparty,
+        overridden=it.overridden,
+    )
+
+
+@router.get("/cashflow-plan", response_model=CashflowPlanOut)
+async def cashflow_plan(user: CurrentUser, session: SessionDep) -> CashflowPlanOut:
+    """«Платёжный календарь»: сколько платить до/после даты дохода за текущий месяц.
+
+    Не зависит от степпера месяца на «Аналитике» — всегда текущий календарный месяц
+    в часовом поясе пользователя. Граница отрезков = день крупнейшего планового дохода.
+    """
+    plan = await cashflow_svc.build_plan(session, user)
+    return CashflowPlanOut(
+        month=plan.month,
+        today=plan.today,
+        boundary_day=plan.boundary_day,
+        incomes=[
+            CashflowIncomeOut(
+                name=i.name, group=i.group, emoji=i.emoji, day=i.day, amount=float(i.amount)
+            )
+            for i in plan.incomes
+        ],
+        overdue=CashflowBucketOut(
+            total=float(plan.overdue_total),
+            items=[_cf_item_out(it) for it in plan.overdue_items],
+        ),
+        segments=[
+            CashflowSegmentOut(
+                index=s.index,
+                label=s.label,
+                boundary_day=s.boundary_day,
+                expected_income=float(s.expected_income),
+                obligations=float(s.obligations),
+                coverage=float(s.coverage),
+                items=[_cf_item_out(it) for it in s.items],
+            )
+            for s in plan.segments
+        ],
+    )

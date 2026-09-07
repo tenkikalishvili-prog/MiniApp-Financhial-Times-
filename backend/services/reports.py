@@ -228,6 +228,9 @@ class BudgetSub:
     emoji: str | None
     spent: Decimal
     limit: Decimal
+    # Плановый доход (S16) — значимо только для income-подкатегорий.
+    expected_day: int | None = None
+    expected_amount: Decimal | None = None
 
 
 @dataclass
@@ -282,6 +285,8 @@ async def budget_overview(
             Category.emoji,
             func.coalesce(spent_subq.c.spent, 0),
             func.coalesce(budget_subq.c.amount, 0),
+            Category.expected_day,
+            Category.expected_amount,
         )
         .outerjoin(spent_subq, spent_subq.c.category_id == Category.id)
         .outerjoin(budget_subq, budget_subq.c.category_id == Category.id)
@@ -295,7 +300,7 @@ async def budget_overview(
 
     groups: list[BudgetGroupView] = []
     index: dict[str, BudgetGroupView] = {}
-    for cid, group, name, emoji, spent_raw, limit_raw in result.all():
+    for cid, group, name, emoji, spent_raw, limit_raw, exp_day, exp_amount in result.all():
         spent = Decimal(str(spent_raw))
         limit = Decimal(str(limit_raw))
         view = index.get(group)
@@ -307,7 +312,15 @@ async def budget_overview(
             index[group] = view
             groups.append(view)
         view.subcategories.append(
-            BudgetSub(category_id=cid, name=name, emoji=emoji, spent=spent, limit=limit)
+            BudgetSub(
+                category_id=cid,
+                name=name,
+                emoji=emoji,
+                spent=spent,
+                limit=limit,
+                expected_day=int(exp_day) if exp_day is not None else None,
+                expected_amount=Decimal(str(exp_amount)) if exp_amount is not None else None,
+            )
         )
         view.spent += spent
         view.limit += limit

@@ -54,6 +54,7 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_ensure_user_columns)
         await conn.run_sync(_ensure_ledger_columns)
+        await conn.run_sync(_ensure_planner_columns)
         await conn.run_sync(_backfill_ledger)
 
 
@@ -90,6 +91,35 @@ def _ensure_ledger_columns(conn) -> None:
     # nullable (по модели); старую локальную dev-БД не перестраиваем (прод — Postgres).
     if is_pg:
         conn.execute(text("ALTER TABLE transactions ALTER COLUMN category_id DROP NOT NULL"))
+
+
+def _ensure_planner_columns(conn) -> None:
+    """Идемпотентно готовит таблицы под «Платёжный календарь» (S16).
+
+    Добавляет плановый доход подкатегориям (``categories.expected_day``/``expected_amount``,
+    значимы только для income) и флаг ручного переноса между отрезками месяца
+    (``bills.segment_override``, ``debts.segment_override``). На Postgres — ``IF NOT EXISTS``
+    (параллельный ALTER бота и API не падает); на свежей SQLite столбцы создаёт ``create_all``.
+    """
+    from sqlalchemy import inspect, text
+
+    is_pg = conn.dialect.name == "postgresql"
+    guard = "IF NOT EXISTS " if is_pg else ""
+
+    additions = {
+        "categories": {
+            "expected_day": "INTEGER",
+            "expected_amount": "NUMERIC(12, 2)",
+        },
+        "bills": {"segment_override": "INTEGER"},
+        "debts": {"segment_override": "INTEGER"},
+    }
+    for table, cols in additions.items():
+        existing = {col["name"] for col in inspect(conn).get_columns(table)}
+        for name, sql_type in cols.items():
+            if name in existing:
+                continue
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {guard}{name} {sql_type}"))
 
 
 def _backfill_ledger(conn) -> None:

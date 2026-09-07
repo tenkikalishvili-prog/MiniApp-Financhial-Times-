@@ -79,6 +79,10 @@ class Category(Base):
     emoji: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     sort_order: Mapped[int] = mapped_column(default=0)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
+    # Платёжный календарь (S16): значимы ТОЛЬКО для article='income' — плановый доход.
+    # День поступления (1–31) и плановая сумма ₽. NULL — доход без даты (не строит отрезки).
+    expected_day: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    expected_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
 
     user: Mapped[User] = relationship(back_populates="categories")
 
@@ -169,6 +173,9 @@ class Debt(Base):
     started_on: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_closed: Mapped[bool] = mapped_column(Boolean, default=False)  # закрыт (возвращён)
+    # Платёжный календарь (S16): ручной перенос долга между отрезками месяца. Постоянное
+    # правило: 1 | 2 | NULL (авто по правилу границы). Просрочку не переносит.
+    segment_override: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     user: Mapped[User] = relationship()
@@ -240,6 +247,9 @@ class Bill(Base):
     category_id: Mapped[int] = mapped_column(ForeignKey("categories.id"), index=True)
     note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    # Платёжный календарь (S16): ручной перенос платежа между отрезками месяца. Постоянное
+    # правило: 1 | 2 | NULL (авто по правилу границы). Просрочку не переносит.
+    segment_override: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
     category: Mapped[Category] = relationship()
