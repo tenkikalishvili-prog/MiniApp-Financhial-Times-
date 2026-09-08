@@ -105,6 +105,13 @@ class BudgetLineOut(CamelModel):
 
 
 # ── Бюджет: полный обзор всех категорий каруселью ─────────────────────────
+class IncomeSlot(CamelModel):
+    """Одна выплата планового дохода: день месяца (1–31) и сумма ₽ (V2, S16.1)."""
+
+    day: int = Field(ge=1, le=31)
+    amount: float = Field(ge=0)
+
+
 class BudgetSubOut(CamelModel):
     subcategory_id: int = Field(serialization_alias="subcategoryId")
     name: str
@@ -114,6 +121,10 @@ class BudgetSubOut(CamelModel):
     # Плановый доход для платёжного календаря (S16) — значимо только для income-подкатегорий.
     expected_day: Optional[int] = Field(default=None, serialization_alias="expectedDay")
     expected_amount: Optional[float] = Field(default=None, serialization_alias="expectedAmount")
+    # V2 (S16.1): несколько выплат в месяц — [{day, amount}, …].
+    income_schedule: Optional[list[IncomeSlot]] = Field(
+        default=None, serialization_alias="incomeSchedule"
+    )
 
 
 class BudgetGroupViewOut(CamelModel):
@@ -134,6 +145,11 @@ class CategoryRename(CamelModel):
     )
     expected_amount: Optional[float] = Field(
         default=None, ge=0, validation_alias="expectedAmount"
+    )
+    # V2 (S16.1): несколько выплат в месяц. Прислан (в т.ч. []/null) ⇒ обновляем;
+    # отсутствует ⇒ не трогаем (различаем по model_fields_set в роуте).
+    income_schedule: Optional[list[IncomeSlot]] = Field(
+        default=None, validation_alias="incomeSchedule"
     )
 
 
@@ -397,7 +413,7 @@ class BillPaidUpdate(CamelModel):
 
 # ── Платёжный календарь (направление D, S16) ─────────────────────────────
 class CashflowItemOut(CamelModel):
-    """Одно обязательство к оплате (платёж или долг) внутри корзины/отрезка."""
+    """Одно обязательство к оплате (платёж или долг) внутри половины месяца."""
 
     kind: str                        # 'bill' | 'debt'
     id: int
@@ -407,11 +423,13 @@ class CashflowItemOut(CamelModel):
     amount: float
     category_name: Optional[str] = Field(default=None, serialization_alias="categoryName")
     counterparty: Optional[str] = None
-    overridden: bool = False         # перенесён вручную в этот отрезок
+    overridden: bool = False         # перенесён вручную в эту половину
+    overdue: bool = False            # просрочен и перенесён вперёд
+    origin_label: Optional[str] = Field(default=None, serialization_alias="originLabel")
 
 
 class CashflowIncomeOut(CamelModel):
-    """Плановый доход (income-подкатегория с датой и суммой)."""
+    """Одна выплата планового дохода (день + сумма) внутри половины месяца."""
 
     name: str
     group: str
@@ -420,31 +438,22 @@ class CashflowIncomeOut(CamelModel):
     amount: float
 
 
-class CashflowBucketOut(CamelModel):
-    """Корзина «Просрочено» — сумма и список позиций."""
-
-    total: float
-    items: list[CashflowItemOut]
-
-
 class CashflowSegmentOut(CamelModel):
-    """Отрезок месяца (до G / после G) с покрытием доходом."""
+    """Половина месяца (① до 15 / ② после 15): три цифры + детализация."""
 
     index: int                       # 1 | 2
     label: str
-    boundary_day: Optional[int] = Field(default=None, serialization_alias="boundaryDay")
-    expected_income: float = Field(serialization_alias="expectedIncome")
-    obligations: float               # сумма обязательств отрезка
-    coverage: float                  # остаток = доход − обязательства (может быть < 0)
+    expected_income: float = Field(serialization_alias="expectedIncome")  # «Придёт»
+    obligations: float               # «К оплате» — сумма обязательств половины
+    coverage: float                  # «Останется» = доход − обязательства (может быть < 0)
+    incomes: list[CashflowIncomeOut]
     items: list[CashflowItemOut]
 
 
 class CashflowPlanOut(CamelModel):
-    """Ответ ``GET /api/cashflow-plan`` — расчёт для текущего месяца."""
+    """Ответ ``GET /api/cashflow-plan`` — две плитки за выбранный месяц."""
 
     month: str                       # 'YYYY-MM'
     today: date
-    boundary_day: Optional[int] = Field(default=None, serialization_alias="boundaryDay")
-    incomes: list[CashflowIncomeOut]
-    overdue: CashflowBucketOut
+    boundary_day: int = Field(serialization_alias="boundaryDay")  # всегда 15
     segments: list[CashflowSegmentOut]

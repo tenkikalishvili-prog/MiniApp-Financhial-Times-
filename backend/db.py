@@ -110,6 +110,8 @@ def _ensure_planner_columns(conn) -> None:
         "categories": {
             "expected_day": "INTEGER",
             "expected_amount": "NUMERIC(12, 2)",
+            # V2 (S16.1): несколько выплат дохода в месяц. JSONB на Postgres, JSON (TEXT) на SQLite.
+            "income_schedule": "JSONB" if is_pg else "JSON",
         },
         "bills": {"segment_override": "INTEGER"},
         "debts": {"segment_override": "INTEGER"},

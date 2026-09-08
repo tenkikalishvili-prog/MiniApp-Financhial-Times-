@@ -31,7 +31,6 @@ from .schemas import (
     BillPaidUpdate,
     BillUpdate,
     BudgetGroupViewOut,
-    CashflowBucketOut,
     CashflowIncomeOut,
     CashflowItemOut,
     CashflowPlanOut,
@@ -39,6 +38,7 @@ from .schemas import (
     BudgetLineOut,
     BudgetSet,
     BudgetSubOut,
+    IncomeSlot,
     CategoryGroupOut,
     CategoryRename,
     CreatedSubcategoryOut,
@@ -331,6 +331,7 @@ async def budget_overview(
                     limit=float(s.limit),
                     expected_day=s.expected_day,
                     expected_amount=float(s.expected_amount) if s.expected_amount is not None else None,
+                    income_schedule=_income_schedule_out(s),
                 )
                 for s in g.subcategories
             ],
@@ -536,20 +537,37 @@ async def rename_category(
     except ValueError as exc:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
 
-    # Плановый доход (S16): поля значимы только для income. Присланы (в т.ч. null)
+    # Плановый доход (S16 → V2): поля значимы только для income. Присланы (в т.ч. null)
     # ⇒ обновляем; отсутствуют ⇒ не трогаем (различаем по model_fields_set).
     fields = body.model_fields_set
-    if "expected_day" in fields or "expected_amount" in fields:
+    if fields & {"expected_day", "expected_amount", "income_schedule"}:
         if category.article != "income":
             raise HTTPException(
                 status.HTTP_400_BAD_REQUEST, "expected income fields valid only for income"
             )
-        if "expected_day" in fields:
-            category.expected_day = body.expected_day
-        if "expected_amount" in fields:
-            category.expected_amount = (
-                Decimal(str(body.expected_amount)) if body.expected_amount is not None else None
-            )
+        if "income_schedule" in fields:
+            # V2: несколько выплат — источник правды. Зеркалим первую в легаси-поля.
+            slots = body.income_schedule or []
+            if slots:
+                category.income_schedule = [
+                    {"day": int(s.day), "amount": float(s.amount)} for s in slots
+                ]
+                first = min(slots, key=lambda s: s.day)
+                category.expected_day = int(first.day)
+                category.expected_amount = Decimal(str(first.amount))
+            else:
+                category.income_schedule = None
+                category.expected_day = None
+                category.expected_amount = None
+        else:
+            # Легаси-путь: одна выплата отдельными полями.
+            if "expected_day" in fields:
+                category.expected_day = body.expected_day
+            if "expected_amount" in fields:
+                category.expected_amount = (
+                    Decimal(str(body.expected_amount)) if body.expected_amount is not None else None
+                )
+            category.income_schedule = None
         await session.commit()
     return SubcategoryOut(id=updated.id, name=updated.name, emoji=updated.emoji)
 
@@ -1178,6 +1196,22 @@ def _valid_segment(value: Optional[int]) -> Optional[int]:
     return value
 
 
+def _income_schedule_out(s) -> Optional[list[IncomeSlot]]:
+    """Расписание выплат дохода для вывода: schedule или фолбэк на одну легаси-выплату."""
+    sched = s.income_schedule if isinstance(s.income_schedule, list) else None
+    if sched:
+        out: list[IncomeSlot] = []
+        for row in sched:
+            try:
+                out.append(IncomeSlot(day=int(row["day"]), amount=float(row["amount"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        return out or None
+    if s.expected_day is not None:
+        return [IncomeSlot(day=int(s.expected_day), amount=float(s.expected_amount or 0))]
+    return None
+
+
 def _cf_item_out(it: cashflow_svc.CashflowItem) -> CashflowItemOut:
     return CashflowItemOut(
         kind=it.kind,
@@ -1189,39 +1223,41 @@ def _cf_item_out(it: cashflow_svc.CashflowItem) -> CashflowItemOut:
         category_name=it.category_name,
         counterparty=it.counterparty,
         overridden=it.overridden,
+        overdue=it.overdue,
+        origin_label=it.origin_label,
     )
 
 
 @router.get("/cashflow-plan", response_model=CashflowPlanOut)
-async def cashflow_plan(user: CurrentUser, session: SessionDep) -> CashflowPlanOut:
-    """«Платёжный календарь»: сколько платить до/после даты дохода за текущий месяц.
+async def cashflow_plan(
+    user: CurrentUser,
+    session: SessionDep,
+    month: Optional[str] = Query(default=None, description="'YYYY-MM'; по умолчанию текущий месяц"),
+) -> CashflowPlanOut:
+    """«Платёжный календарь» V2: две плитки-половины месяца (до 15 / после 15).
 
-    Не зависит от степпера месяца на «Аналитике» — всегда текущий календарный месяц
-    в часовом поясе пользователя. Граница отрезков = день крупнейшего планового дохода.
+    Граница фиксирована на 15-м. Доходы (в т.ч. несколько выплат) и платежи
+    раскладываются по половинам по дате; просрочка переносится вперёд в ближайшую
+    незакрытую половину. Месяц — из степпера ``month`` (по умолчанию текущий, в tz юзера).
     """
-    plan = await cashflow_svc.build_plan(session, user)
+    plan = await cashflow_svc.build_plan(session, user, month)
     return CashflowPlanOut(
         month=plan.month,
         today=plan.today,
         boundary_day=plan.boundary_day,
-        incomes=[
-            CashflowIncomeOut(
-                name=i.name, group=i.group, emoji=i.emoji, day=i.day, amount=float(i.amount)
-            )
-            for i in plan.incomes
-        ],
-        overdue=CashflowBucketOut(
-            total=float(plan.overdue_total),
-            items=[_cf_item_out(it) for it in plan.overdue_items],
-        ),
         segments=[
             CashflowSegmentOut(
                 index=s.index,
                 label=s.label,
-                boundary_day=s.boundary_day,
                 expected_income=float(s.expected_income),
                 obligations=float(s.obligations),
                 coverage=float(s.coverage),
+                incomes=[
+                    CashflowIncomeOut(
+                        name=i.name, group=i.group, emoji=i.emoji, day=i.day, amount=float(i.amount)
+                    )
+                    for i in s.incomes
+                ],
                 items=[_cf_item_out(it) for it in s.items],
             )
             for s in plan.segments

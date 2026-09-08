@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     Date,
@@ -81,8 +82,12 @@ class Category(Base):
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
     # Платёжный календарь (S16): значимы ТОЛЬКО для article='income' — плановый доход.
     # День поступления (1–31) и плановая сумма ₽. NULL — доход без даты (не строит отрезки).
+    # Легаси-поля одной выплаты: сохранены для обратной совместимости чтения (фолбэк).
     expected_day: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     expected_amount: Mapped[Optional[Decimal]] = mapped_column(Numeric(12, 2), nullable=True)
+    # V2 (S16.1): несколько выплат в месяц. Список [{"day": 1–31, "amount": ₽}, …].
+    # Источник правды, когда задан; иначе фолбэк на expected_day/expected_amount (одна выплата).
+    income_schedule: Mapped[Optional[list]] = mapped_column(JSON, nullable=True)
 
     user: Mapped[User] = relationship(back_populates="categories")
 
