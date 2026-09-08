@@ -72,6 +72,12 @@ def _half_ord(year: int, month: int, half: int) -> int:
     return (year * 12 + (month - 1)) * 2 + (half - 1)
 
 
+def _sub_month(year: int, month: int, i: int) -> tuple[int, int]:
+    """(год, месяц) на ``i`` месяцев назад."""
+    total = year * 12 + (month - 1) - i
+    return total // 12, total % 12 + 1
+
+
 def _origin_label(year: int, month: int, day: int) -> str:
     """Человеческая метка исходной даты просрочки, напр. «с 28 авг»."""
     return f"с {day} {_MONTHS_SHORT[month]}"
@@ -220,12 +226,22 @@ async def build_plan(
         )
     ).scalars().all()
 
+    # Смотрим ли мы ТЕКУЩИЙ месяц? Только в нём подтягиваем просрочку из прошлого
+    # (BILLS_LOOKBACK месяцев назад); на других месяцах — лишь свои инстансы.
+    is_current_view = (year == today.year and mon == today.month)
+    BILLS_LOOKBACK = 1  # неоплаченные платежи прошлого месяца всплывают как просрочка
+
+    periods_needed = [period]
+    if is_current_view:
+        for i in range(1, BILLS_LOOKBACK + 1):
+            py, pm = _sub_month(year, mon, i)
+            periods_needed.append(f"{py:04d}-{pm:02d}")
     marks = {
-        m.bill_id
+        (m.bill_id, m.period)
         for m in (
             await session.execute(
                 select(BillMark).where(
-                    BillMark.user_id == user.id, BillMark.period == period
+                    BillMark.user_id == user.id, BillMark.period.in_(periods_needed)
                 )
             )
         ).scalars().all()
@@ -240,20 +256,33 @@ async def build_plan(
             target = seg2
         target.items.append(item)
 
-    # bills — повторяющиеся: берём только инстанс просматриваемого месяца (пустой mark
-    # прошлого месяца ≠ «не оплачено», иначе дублировали бы каждый платёж). Просрочка
-    # внутри месяца: день уже прошёл → переносится вперёд в текущую половину.
+    # bills — повторяющиеся: одна строка на платёж. Берём САМЫЙ РАННИЙ неоплаченный
+    # инстанс в окне [M−BILLS_LOOKBACK … M] (он же самый просроченный), чтобы платёж не
+    # задваивался. Просрочка = срок инстанса раньше «сегодня»; переносится вперёд в
+    # текущую (ближайшую незакрытую) половину. Окно назад — только в текущем месяце.
+    max_back = BILLS_LOOKBACK if is_current_view else 0
     for b in bills:
-        if b.id in marks:
-            continue  # оплачен за этот месяц — пропускаем
+        chosen = None
+        for i in range(max_back, -1, -1):  # от старого к новому
+            iy, im = _sub_month(year, mon, i)
+            if (b.id, f"{iy:04d}-{im:02d}") in marks:
+                continue  # оплачен за этот период
+            chosen = (i, iy, im)
+            break
+        if chosen is None:
+            continue  # оплачен во всех рассматриваемых периодах
+        i, iy, im = chosen
         cat = cats.get(b.category_id)
-        nday = _clamp_day(int(b.due_day), year, mon)
-        nord = _half_ord(year, mon, _half(nday))
+        nday = _clamp_day(int(b.due_day), iy, im)
+        overdue = date(iy, im, nday) < today
+        if i > 0 and not overdue:
+            continue  # прошлый месяц, но срок ещё не наступил
+        nord = _half_ord(iy, im, _half(nday))
         disp = max(nord, cur_ord)
         seg = _place(disp)
         if seg is None:
             continue
-        overdue = nord < cur_ord
+        rolled = (iy, im) != (year, mon)  # перенесён из другого месяца
         _add_item(
             seg,
             CashflowItem(
@@ -266,7 +295,7 @@ async def build_plan(
                 category_name=cat.name if cat else None,
                 override=b.segment_override if b.segment_override in (1, 2) else None,
                 overdue=overdue,
-                origin_label=_origin_label(year, mon, nday) if overdue else None,
+                origin_label=_origin_label(iy, im, nday) if (overdue and rolled) else None,
             ),
         )
 
@@ -291,7 +320,8 @@ async def build_plan(
         seg = _place(disp)
         if seg is None:
             continue
-        overdue = nord < cur_ord
+        overdue = due < today
+        rolled = (due.year, due.month) != (year, mon)
         _add_item(
             seg,
             CashflowItem(
@@ -304,7 +334,7 @@ async def build_plan(
                 counterparty=d.counterparty,
                 override=d.segment_override if d.segment_override in (1, 2) else None,
                 overdue=overdue,
-                origin_label=_origin_label(due.year, due.month, due.day) if overdue else None,
+                origin_label=_origin_label(due.year, due.month, due.day) if (overdue and rolled) else None,
             ),
         )
 
