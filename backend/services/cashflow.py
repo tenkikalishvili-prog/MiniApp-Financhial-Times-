@@ -248,25 +248,20 @@ async def build_plan(
 
     overdue_items: list[CashflowItem] = []
 
-    def _existed(created, iy: int, im: int) -> bool:
-        """Существовал ли объект к концу месяца (iy, im) — по ``created_at``."""
-        if created is None:
-            return True
-        created_d = created.date() if hasattr(created, "date") else created
-        return created_d <= date(iy, im, monthrange(iy, im)[1])
-
     # bills — повторяющиеся (одна запись, срок = число месяца). Раскладываем ДВА независимых
     # среза, без задвоения в пределах одного среза:
     #   (a) инстанс просматриваемого месяца → своя половина по дате (даже если срок уже прошёл —
     #       остаётся в половине с пометкой «просрочен»);
     #   (b) неоплаченные инстансы ПРОШЛЫХ месяцев (окно BILLS_LOOKBACK, только в текущем виде) →
-    #       отдельный блок «Просрочено». Инстанс считаем, только если платёж тогда уже существовал
-    #       (``created_at``) — иначе у новых платежей возникала фантомная просрочка.
+    #       отдельный блок «Просрочено».
+    # NB: НЕ фильтруем по created_at — колонка добавлена миграцией задним числом (у старых строк
+    #     стоит время миграции, а не реальный возраст), поэтому как признак «существовал тогда»
+    #     она недостоверна и скрывала настоящую просрочку.
     max_back = BILLS_LOOKBACK if is_current_view else 0
     for b in bills:
         cat = cats.get(b.category_id)
         # (a) текущий месяц
-        if _existed(b.created_at, year, mon) and (b.id, period) not in marks:
+        if (b.id, period) not in marks:
             nday = _clamp_day(int(b.due_day), year, mon)
             _add_item(
                 seg1 if nday <= BOUNDARY else seg2,
@@ -285,8 +280,6 @@ async def build_plan(
         # (b) просрочка прошлых месяцев
         for i in range(1, max_back + 1):
             iy, im = _sub_month(year, mon, i)
-            if not _existed(b.created_at, iy, im):
-                continue  # платёж создан позже — этого инстанса не было
             if (b.id, f"{iy:04d}-{im:02d}") in marks:
                 continue  # оплачен за тот период
             nday = _clamp_day(int(b.due_day), iy, im)
