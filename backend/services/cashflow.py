@@ -116,8 +116,9 @@ class CashflowItem:
     category_name: Optional[str] = None
     counterparty: Optional[str] = None
     override: Optional[int] = None     # segment_override: 1 | 2 | None (авто)
-    overdue: bool = False              # просрочен и перенесён вперёд
-    origin_label: Optional[str] = None  # «с 28 авг» — исходная дата, если перенесён
+    overdue: bool = False              # срок уже прошёл
+    origin_label: Optional[str] = None  # «с 28 авг» — исходная дата (для блока «Просрочено»)
+    origin_period: Optional[str] = None  # 'YYYY-MM' исходного инстанса — чтобы отметить оплату
 
     @property
     def overridden(self) -> bool:
@@ -159,6 +160,8 @@ class CashflowPlan:
     today: date
     boundary_day: int
     segments: list[CashflowSegment]
+    # Просрочка прошлых месяцев (неоплаченные инстансы) — отдельным блоком, не в половинах.
+    overdue: list[CashflowItem] = field(default_factory=list)
 
 
 def _parse_month(month: Optional[str], today: date) -> tuple[int, int]:
@@ -182,21 +185,8 @@ async def build_plan(
     year, mon = _parse_month(month, today)
     period = f"{year:04d}-{mon:02d}"
 
-    cur_half = _half(today.day)
-    cur_ord = _half_ord(today.year, today.month, cur_half)
-    ord1 = _half_ord(year, mon, 1)
-    ord2 = _half_ord(year, mon, 2)
-
     seg1 = CashflowSegment(index=1, label="Оплатить до 15-го")
     seg2 = CashflowSegment(index=2, label="Оплатить до конца месяца")
-
-    def _place(display_ord: int) -> Optional[CashflowSegment]:
-        """Сегмент этого месяца по display-порядку половины (или None — вне месяца)."""
-        if display_ord == ord1:
-            return seg1
-        if display_ord == ord2:
-            return seg2
-        return None
 
     # ── 1. Плановые доходы: раскладываем выплаты по половинам ──────────────
     inc_rows = await session.execute(
@@ -256,50 +246,69 @@ async def build_plan(
             target = seg2
         target.items.append(item)
 
-    # bills — повторяющиеся: одна строка на платёж. Берём САМЫЙ РАННИЙ неоплаченный
-    # инстанс в окне [M−BILLS_LOOKBACK … M] (он же самый просроченный), чтобы платёж не
-    # задваивался. Просрочка = срок инстанса раньше «сегодня»; переносится вперёд в
-    # текущую (ближайшую незакрытую) половину. Окно назад — только в текущем месяце.
+    overdue_items: list[CashflowItem] = []
+
+    def _existed(created, iy: int, im: int) -> bool:
+        """Существовал ли объект к концу месяца (iy, im) — по ``created_at``."""
+        if created is None:
+            return True
+        created_d = created.date() if hasattr(created, "date") else created
+        return created_d <= date(iy, im, monthrange(iy, im)[1])
+
+    # bills — повторяющиеся (одна запись, срок = число месяца). Раскладываем ДВА независимых
+    # среза, без задвоения в пределах одного среза:
+    #   (a) инстанс просматриваемого месяца → своя половина по дате (даже если срок уже прошёл —
+    #       остаётся в половине с пометкой «просрочен»);
+    #   (b) неоплаченные инстансы ПРОШЛЫХ месяцев (окно BILLS_LOOKBACK, только в текущем виде) →
+    #       отдельный блок «Просрочено». Инстанс считаем, только если платёж тогда уже существовал
+    #       (``created_at``) — иначе у новых платежей возникала фантомная просрочка.
     max_back = BILLS_LOOKBACK if is_current_view else 0
     for b in bills:
-        chosen = None
-        for i in range(max_back, -1, -1):  # от старого к новому
-            iy, im = _sub_month(year, mon, i)
-            if (b.id, f"{iy:04d}-{im:02d}") in marks:
-                continue  # оплачен за этот период
-            chosen = (i, iy, im)
-            break
-        if chosen is None:
-            continue  # оплачен во всех рассматриваемых периодах
-        i, iy, im = chosen
         cat = cats.get(b.category_id)
-        nday = _clamp_day(int(b.due_day), iy, im)
-        overdue = date(iy, im, nday) < today
-        if i > 0 and not overdue:
-            continue  # прошлый месяц, но срок ещё не наступил
-        nord = _half_ord(iy, im, _half(nday))
-        disp = max(nord, cur_ord)
-        seg = _place(disp)
-        if seg is None:
-            continue
-        rolled = (iy, im) != (year, mon)  # перенесён из другого месяца
-        _add_item(
-            seg,
-            CashflowItem(
-                kind="bill",
-                id=b.id,
-                title=b.title,
-                emoji=cat.emoji if cat else None,
-                day=nday,
-                amount=Decimal(str(b.amount)),
-                category_name=cat.name if cat else None,
-                override=b.segment_override if b.segment_override in (1, 2) else None,
-                overdue=overdue,
-                origin_label=_origin_label(iy, im, nday) if (overdue and rolled) else None,
-            ),
-        )
+        # (a) текущий месяц
+        if _existed(b.created_at, year, mon) and (b.id, period) not in marks:
+            nday = _clamp_day(int(b.due_day), year, mon)
+            _add_item(
+                seg1 if nday <= BOUNDARY else seg2,
+                CashflowItem(
+                    kind="bill",
+                    id=b.id,
+                    title=b.title,
+                    emoji=cat.emoji if cat else None,
+                    day=nday,
+                    amount=Decimal(str(b.amount)),
+                    category_name=cat.name if cat else None,
+                    override=b.segment_override if b.segment_override in (1, 2) else None,
+                    overdue=date(year, mon, nday) < today,
+                ),
+            )
+        # (b) просрочка прошлых месяцев
+        for i in range(1, max_back + 1):
+            iy, im = _sub_month(year, mon, i)
+            if not _existed(b.created_at, iy, im):
+                continue  # платёж создан позже — этого инстанса не было
+            if (b.id, f"{iy:04d}-{im:02d}") in marks:
+                continue  # оплачен за тот период
+            nday = _clamp_day(int(b.due_day), iy, im)
+            if date(iy, im, nday) >= today:
+                continue  # срок ещё не наступил (не просрочен)
+            overdue_items.append(
+                CashflowItem(
+                    kind="bill",
+                    id=b.id,
+                    title=b.title,
+                    emoji=cat.emoji if cat else None,
+                    day=nday,
+                    amount=Decimal(str(b.amount)),
+                    category_name=cat.name if cat else None,
+                    overdue=True,
+                    origin_label=_origin_label(iy, im, nday),
+                    origin_period=f"{iy:04d}-{im:02d}",
+                )
+            )
 
-    # debts: все открытые «я должен» со сроком; переносятся вперёд, пока открыты
+    # debts: открытые «я должен» со сроком. Срок в просматриваемом месяце → своя половина;
+    # срок в прошлом (в текущем виде) → блок «Просрочено».
     debts = (
         await session.execute(
             select(Debt).where(
@@ -315,37 +324,47 @@ async def build_plan(
         if remaining <= 0:
             continue
         due = d.due_date
-        nord = _half_ord(due.year, due.month, _half(due.day))
-        disp = max(nord, cur_ord)
-        seg = _place(disp)
-        if seg is None:
-            continue
-        overdue = due < today
-        rolled = (due.year, due.month) != (year, mon)
-        _add_item(
-            seg,
-            CashflowItem(
-                kind="debt",
-                id=d.id,
-                title=d.counterparty,
-                emoji="🤝",
-                day=due.day,
-                amount=remaining,
-                counterparty=d.counterparty,
-                override=d.segment_override if d.segment_override in (1, 2) else None,
-                overdue=overdue,
-                origin_label=_origin_label(due.year, due.month, due.day) if (overdue and rolled) else None,
-            ),
-        )
+        if (due.year, due.month) == (year, mon):
+            _add_item(
+                seg1 if due.day <= BOUNDARY else seg2,
+                CashflowItem(
+                    kind="debt",
+                    id=d.id,
+                    title=d.counterparty,
+                    emoji="🤝",
+                    day=due.day,
+                    amount=remaining,
+                    counterparty=d.counterparty,
+                    override=d.segment_override if d.segment_override in (1, 2) else None,
+                    overdue=due < today,
+                ),
+            )
+        elif is_current_view and due < today:
+            overdue_items.append(
+                CashflowItem(
+                    kind="debt",
+                    id=d.id,
+                    title=d.counterparty,
+                    emoji="🤝",
+                    day=due.day,
+                    amount=remaining,
+                    counterparty=d.counterparty,
+                    overdue=True,
+                    origin_label=_origin_label(due.year, due.month, due.day),
+                    origin_period=f"{due.year:04d}-{due.month:02d}",
+                )
+            )
 
-    # ── 3. Сортировка: просрочка сверху, дальше по дню ────────────────────
+    # ── 3. Сортировка: в половинах — просрочка сверху, дальше по дню; в блоке — по дате ──
     for seg in (seg1, seg2):
         seg.incomes.sort(key=lambda i: (i.day, i.name))
         seg.items.sort(key=lambda it: (not it.overdue, it.day, it.title))
+    overdue_items.sort(key=lambda it: (it.origin_period or "", it.day, it.title))
 
     return CashflowPlan(
         month=period,
         today=today,
         boundary_day=BOUNDARY,
         segments=[seg1, seg2],
+        overdue=overdue_items,
     )

@@ -1225,6 +1225,7 @@ def _cf_item_out(it: cashflow_svc.CashflowItem) -> CashflowItemOut:
         overridden=it.overridden,
         overdue=it.overdue,
         origin_label=it.origin_label,
+        origin_period=it.origin_period,
     )
 
 
@@ -1262,4 +1263,5 @@ async def cashflow_plan(
             )
             for s in plan.segments
         ],
+        overdue=[_cf_item_out(it) for it in plan.overdue],
     )

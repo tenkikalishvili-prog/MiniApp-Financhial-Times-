@@ -424,8 +424,9 @@ class CashflowItemOut(CamelModel):
     category_name: Optional[str] = Field(default=None, serialization_alias="categoryName")
     counterparty: Optional[str] = None
     overridden: bool = False         # перенесён вручную в эту половину
-    overdue: bool = False            # просрочен и перенесён вперёд
+    overdue: bool = False            # срок уже прошёл
     origin_label: Optional[str] = Field(default=None, serialization_alias="originLabel")
+    origin_period: Optional[str] = Field(default=None, serialization_alias="originPeriod")
 
 
 class CashflowIncomeOut(CamelModel):
@@ -457,3 +458,4 @@ class CashflowPlanOut(CamelModel):
     today: date
     boundary_day: int = Field(serialization_alias="boundaryDay")  # всегда 15
     segments: list[CashflowSegmentOut]
+    overdue: list[CashflowItemOut] = []  # просрочка прошлых месяцев — отдельным блоком
