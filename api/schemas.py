@@ -425,6 +425,8 @@ class CashflowItemOut(CamelModel):
     counterparty: Optional[str] = None
     overridden: bool = False         # перенесён вручную в эту половину
     overdue: bool = False            # срок уже прошёл
+    paid: bool = False               # обязательство закрыто полностью (оплачен / долг возвращён)
+    paid_amount: float = Field(default=0.0, serialization_alias="paidAmount")  # уже оплачено/возвращено
     origin_label: Optional[str] = Field(default=None, serialization_alias="originLabel")
     origin_period: Optional[str] = Field(default=None, serialization_alias="originPeriod")
 
@@ -445,7 +447,8 @@ class CashflowSegmentOut(CamelModel):
     index: int                       # 1 | 2
     label: str
     expected_income: float = Field(serialization_alias="expectedIncome")  # «Придёт»
-    obligations: float               # «К оплате» — сумма обязательств половины
+    obligations: float               # «К оплате» — весь план половины (оплаченные + нет)
+    paid_amount: float = Field(default=0.0, serialization_alias="paidAmount")  # уже оплачено
     coverage: float                  # «Останется» = доход − обязательства (может быть < 0)
     incomes: list[CashflowIncomeOut]
     items: list[CashflowItemOut]

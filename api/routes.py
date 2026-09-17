@@ -1224,6 +1224,8 @@ def _cf_item_out(it: cashflow_svc.CashflowItem) -> CashflowItemOut:
         counterparty=it.counterparty,
         overridden=it.overridden,
         overdue=it.overdue,
+        paid=it.paid,
+        paid_amount=float(it.paid_amount),
         origin_label=it.origin_label,
         origin_period=it.origin_period,
     )
@@ -1252,6 +1254,7 @@ async def cashflow_plan(
                 label=s.label,
                 expected_income=float(s.expected_income),
                 obligations=float(s.obligations),
+                paid_amount=float(s.paid_amount),
                 coverage=float(s.coverage),
                 incomes=[
                     CashflowIncomeOut(

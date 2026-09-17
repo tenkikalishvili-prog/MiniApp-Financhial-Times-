@@ -117,6 +117,8 @@ class CashflowItem:
     counterparty: Optional[str] = None
     override: Optional[int] = None     # segment_override: 1 | 2 | None (авто)
     overdue: bool = False              # срок уже прошёл
+    paid: bool = False                 # обязательство закрыто полностью (bill_mark / долг возвращён)
+    paid_amount: Decimal = Decimal("0")  # сколько уже оплачено/возвращено (для прогресса; долг — частично)
     origin_label: Optional[str] = None  # «с 28 авг» — исходная дата (для блока «Просрочено»)
     origin_period: Optional[str] = None  # 'YYYY-MM' исходного инстанса — чтобы отметить оплату
 
@@ -147,7 +149,20 @@ class CashflowSegment:
 
     @property
     def obligations(self) -> Decimal:
+        """«К оплате» — ВЕСЬ план половины: оплаченные + неоплаченные обязательства.
+
+        Считаем целиком (а не только неоплаченное), чтобы «Останется» не менялось
+        при отметке платежа оплаченным — деньги-то уже ушли.
+        """
         return sum((it.amount for it in self.items), Decimal("0"))
+
+    @property
+    def paid_amount(self) -> Decimal:
+        """Сколько уже оплачено/возвращено в половине (для строки прогресса).
+
+        Платёж — вся сумма либо 0; долг — фактически возвращённая часть (может быть < суммы).
+        """
+        return sum((it.paid_amount for it in self.items), Decimal("0"))
 
     @property
     def coverage(self) -> Decimal:
@@ -260,23 +275,27 @@ async def build_plan(
     max_back = BILLS_LOOKBACK if is_current_view else 0
     for b in bills:
         cat = cats.get(b.category_id)
-        # (a) текущий месяц
-        if (b.id, period) not in marks:
-            nday = _clamp_day(int(b.due_day), year, mon)
-            _add_item(
-                seg1 if nday <= BOUNDARY else seg2,
-                CashflowItem(
-                    kind="bill",
-                    id=b.id,
-                    title=b.title,
-                    emoji=cat.emoji if cat else None,
-                    day=nday,
-                    amount=Decimal(str(b.amount)),
-                    category_name=cat.name if cat else None,
-                    override=b.segment_override if b.segment_override in (1, 2) else None,
-                    overdue=date(year, mon, nday) < today,
-                ),
-            )
+        # (a) инстанс просматриваемого месяца — кладём ВСЕГДА, оплаченный помечаем `paid`
+        #     (не выкидываем: иначе «Останется» растёт, а оплаченное исчезает из плитки).
+        is_paid = (b.id, period) in marks
+        nday = _clamp_day(int(b.due_day), year, mon)
+        _add_item(
+            seg1 if nday <= BOUNDARY else seg2,
+            CashflowItem(
+                kind="bill",
+                id=b.id,
+                title=b.title,
+                emoji=cat.emoji if cat else None,
+                day=nday,
+                amount=Decimal(str(b.amount)),
+                category_name=cat.name if cat else None,
+                override=b.segment_override if b.segment_override in (1, 2) else None,
+                # оплаченный платёж не считается просроченным
+                overdue=(not is_paid) and date(year, mon, nday) < today,
+                paid=is_paid,
+                paid_amount=Decimal(str(b.amount)) if is_paid else Decimal("0"),
+            ),
+        )
         # (b) просрочка прошлых месяцев
         for i in range(1, max_back + 1):
             iy, im = _sub_month(year, mon, i)
@@ -300,24 +319,26 @@ async def build_plan(
                 )
             )
 
-    # debts: открытые «я должен» со сроком. Срок в просматриваемом месяце → своя половина;
-    # срок в прошлом (в текущем виде) → блок «Просрочено».
+    # debts: «я должен» со сроком. Срок в просматриваемом месяце → своя половина
+    # (как платёж: обязательство = ПОЛНОЕ тело долга, возврат помечается `paid`/`paid_amount`,
+    # чтобы «Останется» не менялось при возврате); срок в прошлом → блок «Просрочено».
+    # НЕ фильтруем по is_closed: возвращённый долг этого месяца показываем как оплаченный.
     debts = (
         await session.execute(
             select(Debt).where(
                 Debt.user_id == user.id,
                 Debt.direction == "owe",
-                Debt.is_closed.is_(False),
                 Debt.due_date.is_not(None),
             )
         )
     ).scalars().all()
     for d in debts:
-        remaining = Decimal(str(d.amount)) - Decimal(str(d.paid))
-        if remaining <= 0:
-            continue
+        body = Decimal(str(d.amount))               # тело долга — стабильное обязательство месяца
+        returned = min(Decimal(str(d.paid)), body)  # сколько уже возвращено (не больше тела)
+        remaining = body - returned
         due = d.due_date
         if (due.year, due.month) == (year, mon):
+            is_returned = remaining <= 0
             _add_item(
                 seg1 if due.day <= BOUNDARY else seg2,
                 CashflowItem(
@@ -326,13 +347,15 @@ async def build_plan(
                     title=d.counterparty,
                     emoji="🤝",
                     day=due.day,
-                    amount=remaining,
+                    amount=body,
                     counterparty=d.counterparty,
                     override=d.segment_override if d.segment_override in (1, 2) else None,
-                    overdue=due < today,
+                    overdue=(not is_returned) and due < today,
+                    paid=is_returned,
+                    paid_amount=returned,
                 ),
             )
-        elif is_current_view and due < today:
+        elif is_current_view and due < today and remaining > 0:
             overdue_items.append(
                 CashflowItem(
                     kind="debt",
@@ -351,7 +374,8 @@ async def build_plan(
     # ── 3. Сортировка: в половинах — просрочка сверху, дальше по дню; в блоке — по дате ──
     for seg in (seg1, seg2):
         seg.incomes.sort(key=lambda i: (i.day, i.name))
-        seg.items.sort(key=lambda it: (not it.overdue, it.day, it.title))
+        # Оплаченные — вниз; среди неоплаченных просрочка сверху, дальше по дню.
+        seg.items.sort(key=lambda it: (it.paid, not it.overdue, it.day, it.title))
     overdue_items.sort(key=lambda it: (it.origin_period or "", it.day, it.title))
 
     return CashflowPlan(
