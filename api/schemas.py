@@ -84,6 +84,7 @@ class SliceOut(CamelModel):
     name: str
     emoji: Optional[str]
     value: float
+    kind: str = "expense"  # 'expense' | 'debt' (синтетический слайс «Погашение долгов»)
     subcategories: list[SubSliceOut] = []
 
 

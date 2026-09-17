@@ -96,6 +96,7 @@ class GroupBreakdown:
     emoji: str | None
     amount: Decimal
     subcategories: list[SubSlice]
+    kind: str = "expense"  # 'expense' — обычная группа трат; 'debt' — синтетическое «Погашение долгов»
 
 
 async def breakdown_by_group(
@@ -141,8 +142,56 @@ async def breakdown_by_group(
         view.subcategories.append(SubSlice(name=name, emoji=emoji, amount=amount))
         view.amount += amount
 
+    # Синтетическая группа «Погашение долгов» — только в разбивке расходов.
+    # Это НЕ трата (долг = движение ДС), поэтому в KPI «Расход»/«Сэкономлено» и в
+    # дневной лимит не входит — живёт только здесь, в донате, отдельным слайсом (kind='debt').
+    if article == "expense":
+        debt_group = await _debt_repayment_group(session, user_id, start, end)
+        if debt_group is not None:
+            groups.append(debt_group)
+
     groups.sort(key=lambda g: g.amount, reverse=True)
     return groups
+
+
+async def _debt_repayment_group(
+    session: AsyncSession, user_id: int, start: date, end: date
+) -> "GroupBreakdown | None":
+    """«Погашение долгов» за месяц (по контрагентам) как один слайс доната.
+
+    Берём операции возврата по долгам, где деньги УХОДЯТ (я отдаю то, что должен):
+    ``debt_role='payment'`` + ``flow='out'``. Разбивка по контрагенту (``Debt.counterparty``)
+    — для drill-down. Возвращает ``None``, если за месяц таких операций не было.
+    """
+    result = await session.execute(
+        select(
+            Debt.counterparty,
+            func.coalesce(func.sum(Transaction.amount), 0),
+        )
+        .join(Debt, Debt.id == Transaction.debt_id)
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.date >= start,
+            Transaction.date < end,
+            Transaction.debt_role == "payment",
+            Transaction.flow == "out",
+        )
+        .group_by(Debt.counterparty)
+        .order_by(func.sum(Transaction.amount).desc())
+    )
+    subs: list[SubSlice] = []
+    total = Decimal("0")
+    for counterparty, amount_raw in result.all():
+        amount = Decimal(str(amount_raw))
+        if amount <= 0:
+            continue
+        subs.append(SubSlice(name=counterparty or "Без имени", emoji=None, amount=amount))
+        total += amount
+    if total <= 0:
+        return None
+    return GroupBreakdown(
+        group="Погашение долгов", emoji="🤝", amount=total, subcategories=subs, kind="debt"
+    )
 
 
 @dataclass

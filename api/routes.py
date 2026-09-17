@@ -288,6 +288,7 @@ async def analytics(
                 name=g.group,
                 emoji=g.emoji,
                 value=float(g.amount),
+                kind=g.kind,
                 subcategories=[
                     SubSliceOut(name=s.name, emoji=s.emoji, value=float(s.amount))
                     for s in g.subcategories
