@@ -55,15 +55,28 @@ async def month_totals(
     )
 
 
-async def entity_cash_net(
+@dataclass
+class CashFlows:
+    """Валовые движения ДС по целям/долгам за месяц (без взаимозачёта)."""
+
+    cash_in: Decimal  # притоки: занял, вернули долг мне, снял с цели
+    cash_out: Decimal  # оттоки: вернул долг, дал в долг, отложил в цель
+
+    @property
+    def net(self) -> Decimal:
+        return self.cash_in - self.cash_out
+
+
+async def entity_cash_flows(
     session: AsyncSession, user_id: int, year: int, month: int
-) -> Decimal:
-    """Нетто движения ДС по целям/долгам за месяц: Σ(приток) − Σ(отток).
+) -> CashFlows:
+    """Движения ДС по целям/долгам за месяц: раздельно приток (``in``) и отток (``out``).
 
     ``flow`` заполнен ТОЛЬКО у операций по целям/долгам (у доход/расход — NULL), поэтому
     фильтр ``flow IS NOT NULL`` берёт ровно их. Питает «остаток» на Главной (деньги на
-    руках): занял/вернули → +, отдал/отложил в цель/дал в долг → −. В доход/расход и
-    аналитику трат эти операции НЕ входят (нет категории).
+    руках) и KPI-строку Аналитики: занял/вернули → приток, отдал/отложил в цель/дал в
+    долг → отток. В донат-аналитику трат по категориям эти операции НЕ входят (нет
+    категории), но в сводные «Доход»/«Расход» — да (реальное движение денег).
     """
     start, end = month_bounds(year, month)
     result = await session.execute(
@@ -80,7 +93,10 @@ async def entity_cash_net(
         .group_by(Transaction.flow)
     )
     sums = {row[0]: Decimal(str(row[1])) for row in result.all()}
-    return sums.get("in", Decimal("0")) - sums.get("out", Decimal("0"))
+    return CashFlows(
+        cash_in=sums.get("in", Decimal("0")),
+        cash_out=sums.get("out", Decimal("0")),
+    )
 
 
 @dataclass

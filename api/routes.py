@@ -237,8 +237,10 @@ async def overview(
 
     totals = await reports.month_totals(session, user.id, year, mon)
     daily = await get_daily_limit(session, user.id)
-    # Движения по целям/долгам входят в «остаток» (деньги на руках), но НЕ в доход/расход.
-    entity_net = await reports.entity_cash_net(session, user.id, year, mon)
+    # Движения по целям/долгам (возврат долга, взятое в долг, взносы в цели) входят в
+    # «остаток» (деньги на руках) и в сводные «Доход»/«Расход» KPI-строки Аналитики
+    # (реальное движение денег), но НЕ в донат-разбивку трат по категориям.
+    flows = await reports.entity_cash_flows(session, user.id, year, mon)
 
     lines = await reports.budget_lines(
         session, user.id, year, mon, group=DISCRETIONARY_GROUP
@@ -249,7 +251,9 @@ async def overview(
         month=month_str,
         income=float(totals.income),
         expense=float(totals.expense),
-        remaining=float(totals.income - totals.expense + entity_net),
+        cash_in=float(flows.cash_in),
+        cash_out=float(flows.cash_out),
+        remaining=float(totals.income - totals.expense + flows.net),
         daily_limit=float(daily.per_day),
         days_left=daily.days_left,
         has_budget=daily.has_budget,

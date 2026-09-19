@@ -66,6 +66,8 @@ class OverviewOut(CamelModel):
     month: str  # YYYY-MM
     income: float
     expense: float
+    cash_in: float = Field(serialization_alias="cashIn")
+    cash_out: float = Field(serialization_alias="cashOut")
     remaining: float
     daily_limit: float = Field(serialization_alias="dailyLimit")
     days_left: int = Field(serialization_alias="daysLeft")
