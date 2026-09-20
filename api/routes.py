@@ -241,6 +241,9 @@ async def overview(
     # «остаток» (деньги на руках) и в сводные «Доход»/«Расход» KPI-строки Аналитики
     # (реальное движение денег), но НЕ в донат-разбивку трат по категориям.
     flows = await reports.entity_cash_flows(session, user.id, year, mon)
+    # Блок «Долги» на Аналитике: движение только по долгам (без целей) + позиция.
+    debt_flows = await reports.debt_cash_flows(session, user.id, year, mon)
+    position = await reports.debt_position(session, user.id)
 
     lines = await reports.budget_lines(
         session, user.id, year, mon, group=DISCRETIONARY_GROUP
@@ -254,6 +257,10 @@ async def overview(
         cash_in=float(flows.cash_in),
         cash_out=float(flows.cash_out),
         remaining=float(totals.income - totals.expense + flows.net),
+        debt_in=float(debt_flows.cash_in),
+        debt_out=float(debt_flows.cash_out),
+        debt_i_owe=float(position.i_owe),
+        debt_owed_to_me=float(position.owed_to_me),
         daily_limit=float(daily.per_day),
         days_left=daily.days_left,
         has_budget=daily.has_budget,

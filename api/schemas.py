@@ -69,6 +69,11 @@ class OverviewOut(CamelModel):
     cash_in: float = Field(serialization_alias="cashIn")
     cash_out: float = Field(serialization_alias="cashOut")
     remaining: float
+    # Блок «Долги» на Аналитике: движение за месяц (только долги, без целей) + позиция.
+    debt_in: float = Field(serialization_alias="debtIn")
+    debt_out: float = Field(serialization_alias="debtOut")
+    debt_i_owe: float = Field(serialization_alias="debtIOwe")  # я должен (накопительно)
+    debt_owed_to_me: float = Field(serialization_alias="debtOwedToMe")  # мне должны
     daily_limit: float = Field(serialization_alias="dailyLimit")
     days_left: int = Field(serialization_alias="daysLeft")
     has_budget: bool = Field(serialization_alias="hasBudget")

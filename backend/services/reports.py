@@ -158,55 +158,72 @@ async def breakdown_by_group(
         view.subcategories.append(SubSlice(name=name, emoji=emoji, amount=amount))
         view.amount += amount
 
-    # Синтетическая группа «Погашение долгов» — только в разбивке расходов.
-    # Это НЕ трата (долг = движение ДС), поэтому в KPI «Расход»/«Сэкономлено» и в
-    # дневной лимит не входит — живёт только здесь, в донате, отдельным слайсом (kind='debt').
-    if article == "expense":
-        debt_group = await _debt_repayment_group(session, user_id, start, end)
-        if debt_group is not None:
-            groups.append(debt_group)
-
+    # Долги в донат НЕ входят: движение по долгам — не трата, оно живёт в отдельном
+    # блоке «Долги» на экране Аналитики (см. debt_cash_flows / debt_position ниже).
     groups.sort(key=lambda g: g.amount, reverse=True)
     return groups
 
 
-async def _debt_repayment_group(
-    session: AsyncSession, user_id: int, start: date, end: date
-) -> "GroupBreakdown | None":
-    """«Погашение долгов» за месяц (по контрагентам) как один слайс доната.
+@dataclass
+class DebtPosition:
+    """Накопительная долговая позиция (не деньги на руках, не привязана к месяцу)."""
 
-    Берём операции возврата по долгам, где деньги УХОДЯТ (я отдаю то, что должен):
-    ``debt_role='payment'`` + ``flow='out'``. Разбивка по контрагенту (``Debt.counterparty``)
-    — для drill-down. Возвращает ``None``, если за месяц таких операций не было.
+    i_owe: Decimal       # я должен (непогашенный остаток по direction='owe')
+    owed_to_me: Decimal  # мне должны (непогашенный остаток по direction='lent')
+
+
+async def debt_cash_flows(
+    session: AsyncSession, user_id: int, year: int, month: int
+) -> CashFlows:
+    """Долговые движения ДС за месяц — ТОЛЬКО операции по долгам (``debt_id`` задан).
+
+    В отличие от ``entity_cash_flows`` (долги + цели), сюда цели НЕ попадают: блок «Долги»
+    на Аналитике должен показывать именно долги. Приток (``in``) — занял / вернули мне;
+    отток (``out``) — вернул свой долг / дал в долг.
     """
+    start, end = month_bounds(year, month)
     result = await session.execute(
         select(
-            Debt.counterparty,
+            Transaction.flow,
             func.coalesce(func.sum(Transaction.amount), 0),
         )
-        .join(Debt, Debt.id == Transaction.debt_id)
         .where(
             Transaction.user_id == user_id,
             Transaction.date >= start,
             Transaction.date < end,
-            Transaction.debt_role == "payment",
-            Transaction.flow == "out",
+            Transaction.debt_id.isnot(None),
+            Transaction.flow.isnot(None),
         )
-        .group_by(Debt.counterparty)
-        .order_by(func.sum(Transaction.amount).desc())
+        .group_by(Transaction.flow)
     )
-    subs: list[SubSlice] = []
-    total = Decimal("0")
-    for counterparty, amount_raw in result.all():
-        amount = Decimal(str(amount_raw))
-        if amount <= 0:
-            continue
-        subs.append(SubSlice(name=counterparty or "Без имени", emoji=None, amount=amount))
-        total += amount
-    if total <= 0:
-        return None
-    return GroupBreakdown(
-        group="Погашение долгов", emoji="🤝", amount=total, subcategories=subs, kind="debt"
+    sums = {row[0]: Decimal(str(row[1])) for row in result.all()}
+    return CashFlows(
+        cash_in=sums.get("in", Decimal("0")),
+        cash_out=sums.get("out", Decimal("0")),
+    )
+
+
+async def debt_position(session: AsyncSession, user_id: int) -> DebtPosition:
+    """Сумма непогашенных остатков (``amount − paid``) по открытым долгам, по направлениям.
+
+    ``owe`` → «я должен», ``lent`` → «мне должны». Закрытые (``is_closed``) не учитываем.
+    Накопительно по всем месяцам — эта позиция переходит из месяца в месяц до погашения.
+    """
+    result = await session.execute(
+        select(
+            Debt.direction,
+            func.coalesce(func.sum(Debt.amount - Debt.paid), 0),
+        )
+        .where(
+            Debt.user_id == user_id,
+            Debt.is_closed.is_(False),
+        )
+        .group_by(Debt.direction)
+    )
+    sums = {row[0]: Decimal(str(row[1])) for row in result.all()}
+    return DebtPosition(
+        i_owe=max(sums.get("owe", Decimal("0")), Decimal("0")),
+        owed_to_me=max(sums.get("lent", Decimal("0")), Decimal("0")),
     )
 
 
