@@ -203,6 +203,71 @@ async def debt_cash_flows(
     )
 
 
+@dataclass
+class DebtFreeBreakdown:
+    """Долговые движения месяца, разложенные по экономическому смыслу для «Свободно».
+
+    В отличие от грубого ``debt_cash_flows`` (in/out), здесь четыре потока различаются
+    по ``Debt.direction`` × ``Transaction.debt_role``. Это нужно, чтобы честно посчитать
+    «Свободно за месяц»: заём не является доходом (не добавляет свободных денег), а
+    возврат своего долга — реальная выплата из заработка (вычитается).
+    """
+
+    borrowed: Decimal = Decimal("0")   # занял:       owe  · principal · in  → НЕ доход
+    repaid: Decimal = Decimal("0")     # вернул:      owe  · payment   · out → минусует
+    lent_out: Decimal = Decimal("0")   # дал в долг:  lent · principal · out → минусует
+    returned_to_me: Decimal = Decimal("0")  # вернули мне: lent · payment · in → плюсует
+
+    @property
+    def free_impact(self) -> Decimal:
+        """Сколько долги ЗАБРАЛИ из свободных денег за месяц (может быть отрицательным).
+
+        Заём (``borrowed``) не участвует: это не доход. Возврат своего долга и выданное
+        в долг уменьшают свободное; возвращённое мне — возвращает обратно.
+        """
+        return self.repaid + self.lent_out - self.returned_to_me
+
+
+async def debt_free_breakdown(
+    session: AsyncSession, user_id: int, year: int, month: int
+) -> DebtFreeBreakdown:
+    """Разложение долговых движений месяца на 4 потока (занял/вернул/дал/вернули мне).
+
+    Соединяем операцию по долгу с карточкой долга ради ``direction`` и группируем по
+    (``direction``, ``debt_role``, ``flow``). Питает «Свободно за месяц» на Аналитике.
+    """
+    start, end = month_bounds(year, month)
+    result = await session.execute(
+        select(
+            Debt.direction,
+            Transaction.debt_role,
+            Transaction.flow,
+            func.coalesce(func.sum(Transaction.amount), 0),
+        )
+        .join(Debt, Debt.id == Transaction.debt_id)
+        .where(
+            Transaction.user_id == user_id,
+            Transaction.date >= start,
+            Transaction.date < end,
+            Transaction.debt_id.isnot(None),
+            Transaction.flow.isnot(None),
+        )
+        .group_by(Debt.direction, Transaction.debt_role, Transaction.flow)
+    )
+    b = DebtFreeBreakdown()
+    for direction, role, flow, total in result.all():
+        amt = Decimal(str(total))
+        if direction == "owe" and flow == "in":
+            b.borrowed += amt          # занял
+        elif direction == "owe" and flow == "out":
+            b.repaid += amt            # вернул свой долг
+        elif direction == "lent" and flow == "out":
+            b.lent_out += amt          # дал в долг
+        elif direction == "lent" and flow == "in":
+            b.returned_to_me += amt    # вернули мне
+    return b
+
+
 async def debt_position(session: AsyncSession, user_id: int) -> DebtPosition:
     """Сумма непогашенных остатков (``amount − paid``) по открытым долгам, по направлениям.
 

@@ -74,6 +74,13 @@ class OverviewOut(CamelModel):
     debt_out: float = Field(serialization_alias="debtOut")
     debt_i_owe: float = Field(serialization_alias="debtIOwe")  # я должен (накопительно)
     debt_owed_to_me: float = Field(serialization_alias="debtOwedToMe")  # мне должны
+    # Разложение долговых движений месяца по смыслу (для «Свободно за месяц»).
+    debt_borrowed: float = Field(serialization_alias="debtBorrowed")  # занял (не доход)
+    debt_repaid: float = Field(serialization_alias="debtRepaid")  # вернул свой долг
+    debt_lent: float = Field(serialization_alias="debtLent")  # дал в долг
+    debt_returned: float = Field(serialization_alias="debtReturned")  # вернули мне
+    # «Свободно за месяц» = доход − расход − (вернул + дал − вернули мне). Заём НЕ считается.
+    free: float
     daily_limit: float = Field(serialization_alias="dailyLimit")
     days_left: int = Field(serialization_alias="daysLeft")
     has_budget: bool = Field(serialization_alias="hasBudget")

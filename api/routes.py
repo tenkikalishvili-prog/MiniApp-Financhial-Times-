@@ -243,6 +243,8 @@ async def overview(
     flows = await reports.entity_cash_flows(session, user.id, year, mon)
     # Блок «Долги» на Аналитике: движение только по долгам (без целей) + позиция.
     debt_flows = await reports.debt_cash_flows(session, user.id, year, mon)
+    # Разбор долгов на 4 потока (занял/вернул/дал/вернули мне) для «Свободно за месяц».
+    debt_br = await reports.debt_free_breakdown(session, user.id, year, mon)
     position = await reports.debt_position(session, user.id)
 
     lines = await reports.budget_lines(
@@ -261,6 +263,12 @@ async def overview(
         debt_out=float(debt_flows.cash_out),
         debt_i_owe=float(position.i_owe),
         debt_owed_to_me=float(position.owed_to_me),
+        debt_borrowed=float(debt_br.borrowed),
+        debt_repaid=float(debt_br.repaid),
+        debt_lent=float(debt_br.lent_out),
+        debt_returned=float(debt_br.returned_to_me),
+        # Свободно = заработок (доход − расход) минус то, что долги забрали. Заём не в счёт.
+        free=float(totals.income - totals.expense - debt_br.free_impact),
         daily_limit=float(daily.per_day),
         days_left=daily.days_left,
         has_budget=daily.has_budget,
