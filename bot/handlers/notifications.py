@@ -23,6 +23,7 @@ from backend.services.limits import (
     get_daily_limit,
     get_evening_summary,
 )
+from backend.services import streak as streak_svc
 from backend.services.reminders import build_reminders
 from backend.services.users import get_all_users, get_or_create_user
 
@@ -174,6 +175,48 @@ async def _send_reminders(bot: Bot, session, user: User, on_date: date) -> None:
         await _safe_send(bot, user.telegram_id, text, "Напоминания")
 
 
+STREAK_WARN_HOUR = 21  # локальный час вечернего предупреждения «серия сгорит»
+
+
+def _days(n: int) -> str:
+    mod10, mod100 = n % 10, n % 100
+    if mod10 == 1 and mod100 != 11:
+        return f"{n} день"
+    if 2 <= mod10 <= 4 and not 12 <= mod100 <= 14:
+        return f"{n} дня"
+    return f"{n} дней"
+
+
+async def _send_streak_warning(bot: Bot, session, user: User) -> None:
+    """Вечером: серия идёт, но сегодня день не закрыт — мягко напоминаем (без стыда)."""
+    info = await streak_svc.get_streak(session, user)
+    if info.at_risk:
+        await _safe_send(
+            bot,
+            user.telegram_id,
+            f"🔥 Серия — {_days(info.current)}. Чтобы не потерять её, внеси операцию "
+            "или нажми «Трат не было» в приложении до конца дня.",
+            "Серия-вечер",
+        )
+
+
+async def _send_streak_break_notice(bot: Bot, session, user: User) -> None:
+    """Утром после обрыва: один раз сообщаем и предлагаем начать заново."""
+    today = streak_svc.local_today(user)
+    if user.streak_notice_date == today:
+        return
+    broken = streak_svc.broken_run_length(await streak_svc.closed_days(session, user, today), today)
+    if broken >= 2:
+        user.streak_notice_date = today
+        await session.commit()
+        await _safe_send(
+            bot,
+            user.telegram_id,
+            f"Серия в {_days(broken)} прервалась — такое бывает. Начнём новую сегодня? 💪",
+            "Серия-утро",
+        )
+
+
 async def send_due_notifications(bot: Bot) -> None:
     """Почасовой тик: шлём тем, у кого настроенный час совпал с их локальным.
 
@@ -193,3 +236,8 @@ async def send_due_notifications(bot: Bot) -> None:
                 await _send_reminders(bot, session, user, on_date)
             if user.evening_enabled and now.hour == user.evening_hour:
                 await _send_evening(bot, session, user, on_date)
+            # Серия (G1): вечернее предупреждение и утреннее «серия прервалась».
+            if user.evening_enabled and now.hour == STREAK_WARN_HOUR:
+                await _send_streak_warning(bot, session, user)
+            if user.morning_enabled and now.hour == user.morning_hour:
+                await _send_streak_break_notice(bot, session, user)

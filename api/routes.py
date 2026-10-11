@@ -12,6 +12,7 @@ from sqlalchemy import delete, select
 from backend.models import Bill, BillMark, Budget, Category, Debt, Transaction
 from backend.models import Credit, Goal, User
 from backend.services import credits as credits_svc
+from backend.services import streak as streak_svc
 from backend.services import bills as bills_svc
 from backend.services import cashflow as cashflow_svc
 from backend.services import categories as categories_svc
@@ -68,6 +69,7 @@ from .schemas import (
     OnboardingIn,
     OverviewOut,
     SettingsOut,
+    StreakOut,
     SettingsUpdate,
     SliceOut,
     SubSliceOut,
@@ -232,6 +234,28 @@ async def update_settings(
         reminders_enabled=body.reminders_enabled,
     )
     return _settings_out(updated)
+
+
+# ── Серия «день закрыт» (геймификация G1) ────────────────────────────────
+def _streak_out(info) -> StreakOut:
+    return StreakOut(
+        current=info.current,
+        longest=info.longest,
+        closed_today=info.closed_today,
+        at_risk=info.at_risk,
+        today=info.today,
+    )
+
+
+@router.get("/streak", response_model=StreakOut)
+async def get_streak(user: CurrentUser, session: SessionDep) -> StreakOut:
+    return _streak_out(await streak_svc.get_streak(session, user))
+
+
+@router.post("/day/close", response_model=StreakOut)
+async def close_day(user: CurrentUser, session: SessionDep) -> StreakOut:
+    """«Трат не было»: закрывает сегодняшний день без операции (идемпотентно)."""
+    return _streak_out(await streak_svc.close_day_manual(session, user))
 
 
 # ── Обзор месяца (Главная) ───────────────────────────────────────────────

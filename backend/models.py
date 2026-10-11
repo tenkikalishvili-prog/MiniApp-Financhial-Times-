@@ -64,6 +64,14 @@ class User(Base):
     # которую человек готов направлять на досрочку; на расчёты не влияет — это ориентир.
     credit_fund: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
 
+    # ── Геймификация (G1–G4): серия «день закрыт», заморозки, XP ──────────
+    # Текущая серия НЕ хранится — считается из операций и отметок (см. services/streak.py);
+    # храним только рекорд, число заморозок, потраченный XP и дату последнего «серия прервалась»-пуша.
+    longest_streak: Mapped[int] = mapped_column(Integer, default=0)
+    streak_freezes: Mapped[int] = mapped_column(Integer, default=1)
+    xp_spent: Mapped[int] = mapped_column(Integer, default=0)
+    streak_notice_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
     categories: Mapped[list[Category]] = relationship(back_populates="user")
     transactions: Mapped[list[Transaction]] = relationship(back_populates="user")
 
@@ -162,6 +170,24 @@ class Transaction(Base):
     goal: Mapped[Optional["Goal"]] = relationship()
     debt: Mapped[Optional["Debt"]] = relationship()
     credit: Mapped[Optional["Credit"]] = relationship()
+
+
+class DailyActivity(Base):
+    """Отметка закрытого дня БЕЗ операции (геймификация G1/G4).
+
+    ``manual_empty`` — пользователь нажал «Трат не было»; ``freeze`` — день спасён заморозкой.
+    Дни с операциями здесь НЕ хранятся: они берутся из ``transactions`` (так серию не нужно
+    вешать на каждую точку ввода — приложение, бот, голос, чек, платежи).
+    """
+
+    __tablename__ = "daily_activity"
+    __table_args__ = (UniqueConstraint("user_id", "local_date", name="uq_daily_activity"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    local_date: Mapped[date] = mapped_column(Date)
+    source: Mapped[str] = mapped_column(String(16))  # manual_empty | freeze
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
 class Credit(Base):

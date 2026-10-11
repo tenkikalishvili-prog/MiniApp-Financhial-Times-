@@ -531,3 +531,12 @@ class CreditRepaymentOut(CamelModel):
 class CreditRepaymentCreate(CamelModel):
     amount: float = Field(gt=0)
     on_date: Optional[date] = Field(default=None, validation_alias="date")
+
+
+# ── Геймификация: серия (G1) ─────────────────────────────────────────────
+class StreakOut(CamelModel):
+    current: int                       # текущая серия (дней подряд «день закрыт»)
+    longest: int                       # рекорд
+    closed_today: bool = Field(serialization_alias="closedToday")
+    at_risk: bool = Field(serialization_alias="atRisk")  # серия идёт, сегодня ещё не закрыт
+    today: date                        # локальная дата пользователя

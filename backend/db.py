@@ -56,6 +56,7 @@ async def init_db() -> None:
         await conn.run_sync(_ensure_ledger_columns)
         await conn.run_sync(_ensure_planner_columns)
         await conn.run_sync(_ensure_credit_columns)
+        await conn.run_sync(_ensure_gamification_columns)
         await conn.run_sync(_backfill_ledger)
 
 
@@ -146,6 +147,24 @@ def _ensure_credit_columns(conn) -> None:
             if name in existing:
                 continue
             conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {guard}{name} {sql_type}"))
+
+
+def _ensure_gamification_columns(conn) -> None:
+    """Идемпотентно добавляет в ``users`` поля геймификации (таблица daily_activity — create_all)."""
+    from sqlalchemy import inspect, text
+
+    is_pg = conn.dialect.name == "postgresql"
+    guard = "IF NOT EXISTS " if is_pg else ""
+    existing = {col["name"] for col in inspect(conn).get_columns("users")}
+    to_add = {
+        "longest_streak": "INTEGER DEFAULT 0",
+        "streak_freezes": "INTEGER DEFAULT 1",
+        "xp_spent": "INTEGER DEFAULT 0",
+        "streak_notice_date": "DATE",
+    }
+    for name, sql_type in to_add.items():
+        if name not in existing:
+            conn.execute(text(f"ALTER TABLE users ADD COLUMN {guard}{name} {sql_type}"))
 
 
 def _backfill_ledger(conn) -> None:
