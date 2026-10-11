@@ -540,3 +540,21 @@ class StreakOut(CamelModel):
     closed_today: bool = Field(serialization_alias="closedToday")
     at_risk: bool = Field(serialization_alias="atRisk")  # серия идёт, сегодня ещё не закрыт
     today: date                        # локальная дата пользователя
+
+
+# ── Геймификация: кольцо дня (G2) ────────────────────────────────────────
+class WeekDayOut(CamelModel):
+    day: date
+    state: str                          # within | over | open
+
+
+class DayRingOut(CamelModel):
+    has_budget: bool = Field(serialization_alias="hasBudget")
+    today: date
+    today_spent: float = Field(serialization_alias="todaySpent")
+    daily_target: float = Field(serialization_alias="dailyTarget")
+    status: str                         # good | medium | bad
+    pct: int                            # доля дневного ориентира, % (может быть > 100)
+    days_closed: int = Field(serialization_alias="daysClosed")
+    days_within: int = Field(serialization_alias="daysWithin")
+    week: list[WeekDayOut]

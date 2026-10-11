@@ -12,6 +12,7 @@ from sqlalchemy import delete, select
 from backend.models import Bill, BillMark, Budget, Category, Debt, Transaction
 from backend.models import Credit, Goal, User
 from backend.services import credits as credits_svc
+from backend.services import dayring as dayring_svc
 from backend.services import streak as streak_svc
 from backend.services import bills as bills_svc
 from backend.services import cashflow as cashflow_svc
@@ -51,6 +52,8 @@ from .schemas import (
     CreditRepaymentOut,
     CreditsOut,
     CreditUpdate,
+    DayRingOut,
+    WeekDayOut,
     DebtCreate,
     DebtOut,
     DebtPaymentCreate,
@@ -256,6 +259,23 @@ async def get_streak(user: CurrentUser, session: SessionDep) -> StreakOut:
 async def close_day(user: CurrentUser, session: SessionDep) -> StreakOut:
     """«Трат не было»: закрывает сегодняшний день без операции (идемпотентно)."""
     return _streak_out(await streak_svc.close_day_manual(session, user))
+
+
+@router.get("/day-ring", response_model=DayRingOut)
+async def get_day_ring(user: CurrentUser, session: SessionDep) -> DayRingOut:
+    """«Кольцо дня» (G2): траты сегодня vs дневной ориентир «Трат» + дни «в рамках»."""
+    r = await dayring_svc.get_day_ring(session, user)
+    return DayRingOut(
+        has_budget=r.has_budget,
+        today=r.today,
+        today_spent=float(r.today_spent),
+        daily_target=float(r.daily_target),
+        status=r.status,
+        pct=r.pct,
+        days_closed=r.days_closed,
+        days_within=r.days_within,
+        week=[WeekDayOut(day=w.day, state=w.state) for w in r.week],
+    )
 
 
 # ── Обзор месяца (Главная) ───────────────────────────────────────────────
