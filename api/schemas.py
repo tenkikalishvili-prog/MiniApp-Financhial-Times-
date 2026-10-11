@@ -540,6 +540,10 @@ class StreakOut(CamelModel):
     closed_today: bool = Field(serialization_alias="closedToday")
     at_risk: bool = Field(serialization_alias="atRisk")  # серия идёт, сегодня ещё не закрыт
     today: date                        # локальная дата пользователя
+    freezes: int = 0                   # заморозок сейчас
+    max_freezes: int = Field(default=2, serialization_alias="maxFreezes")
+    freeze_cost: int = Field(default=150, serialization_alias="freezeCost")  # цена заморозки, XP
+    frozen_yesterday: bool = Field(default=False, serialization_alias="frozenYesterday")
 
 
 # ── Геймификация: кольцо дня (G2) ────────────────────────────────────────

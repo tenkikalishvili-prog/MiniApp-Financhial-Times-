@@ -242,25 +242,39 @@ async def update_settings(
 
 
 # ── Серия «день закрыт» (геймификация G1) ────────────────────────────────
-def _streak_out(info) -> StreakOut:
+def _streak_out(info, user) -> StreakOut:
     return StreakOut(
         current=info.current,
         longest=info.longest,
         closed_today=info.closed_today,
         at_risk=info.at_risk,
         today=info.today,
+        freezes=user.streak_freezes or 0,
+        max_freezes=streak_svc.MAX_FREEZES,
+        freeze_cost=streak_svc.FREEZE_COST_XP,
+        frozen_yesterday=info.frozen_yesterday,
     )
 
 
 @router.get("/streak", response_model=StreakOut)
 async def get_streak(user: CurrentUser, session: SessionDep) -> StreakOut:
-    return _streak_out(await streak_svc.get_streak(session, user))
+    return _streak_out(await streak_svc.get_streak(session, user), user)
 
 
 @router.post("/day/close", response_model=StreakOut)
 async def close_day(user: CurrentUser, session: SessionDep) -> StreakOut:
     """«Трат не было»: закрывает сегодняшний день без операции (идемпотентно)."""
-    return _streak_out(await streak_svc.close_day_manual(session, user))
+    return _streak_out(await streak_svc.close_day_manual(session, user), user)
+
+
+@router.post("/streak/freeze", response_model=StreakOut)
+async def buy_streak_freeze(user: CurrentUser, session: SessionDep) -> StreakOut:
+    """Покупка заморозки серии за XP (G4): до 2 штук, цена фиксирована."""
+    try:
+        await xp_svc.buy_freeze(session, user)
+    except xp_svc.FreezeError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
+    return _streak_out(await streak_svc.get_streak(session, user), user)
 
 
 @router.get("/xp", response_model=XpOut)

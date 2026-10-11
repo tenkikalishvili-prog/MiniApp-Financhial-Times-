@@ -88,24 +88,30 @@ async def closed_days(
     return days
 
 
-def run_ending_at(closed: set[date], end: date) -> int:
-    """Длина непрерывной цепочки закрытых дней, заканчивающейся датой ``end``."""
+def run_ending_at(closed: set[date], end: date, frozen: frozenset = frozenset()) -> int:
+    """Длина цепочки закрытых дней, заканчивающейся датой ``end``.
+
+    Замороженный день (``frozen``) сохраняет цепочку, но сам в число дней серии не входит —
+    как у Duolingo: заморозка спасает серию, а не накручивает её.
+    """
     n, d = 0, end
     while d in closed:
-        n += 1
+        if d not in frozen:
+            n += 1
         d -= timedelta(days=1)
     return n
 
 
-def longest_run(closed: set[date]) -> int:
+def longest_run(closed: set[date], frozen: frozenset = frozenset()) -> int:
     starts = [d for d in closed if (d - timedelta(days=1)) not in closed]  # начала цепочек
-    return max((_run_from(closed, d) for d in starts), default=0)
+    return max((_run_from(closed, d, frozen) for d in starts), default=0)
 
 
-def _run_from(closed: set[date], start: date) -> int:
+def _run_from(closed: set[date], start: date, frozen: frozenset = frozenset()) -> int:
     n, d = 0, start
     while d in closed:
-        n += 1
+        if d not in frozen:
+            n += 1
         d += timedelta(days=1)
     return n
 
@@ -118,16 +124,18 @@ class StreakInfo:
     at_risk: bool          # серия идёт, но сегодня день ещё не закрыт
     today: date
     last_closed: Optional[date]
+    frozen_yesterday: bool = False  # вчера серию спасла заморозка
 
 
 def compute(closed_map: dict[date, str], today: date, stored_longest: int = 0) -> StreakInfo:
     """Серия и рекорд по множеству закрытых дней."""
     closed = set(closed_map)
+    frozen = frozenset(d for d, src in closed_map.items() if src == "freeze")
     closed_today = today in closed
     # Если сегодня ещё не закрыт — серия «держится» до конца дня по вчерашнему.
     anchor = today if closed_today else today - timedelta(days=1)
-    current = run_ending_at(closed, anchor)
-    longest = max(stored_longest, longest_run(closed), current)
+    current = run_ending_at(closed, anchor, frozen)
+    longest = max(stored_longest, longest_run(closed, frozen), current)
     return StreakInfo(
         current=current,
         longest=longest,
@@ -135,11 +143,49 @@ def compute(closed_map: dict[date, str], today: date, stored_longest: int = 0) -
         at_risk=current > 0 and not closed_today,
         today=today,
         last_closed=max(closed) if closed else None,
+        frozen_yesterday=closed_map.get(today - timedelta(days=1)) == "freeze",
     )
+
+
+# ── Заморозки серии (G4) ────────────────────────────────────────────────
+MAX_FREEZES = 2
+FREEZE_COST_XP = 150
+# Заморозку не тратим на «серию из одного дня» — это не потеря.
+MIN_RUN_FOR_FREEZE = 2
+
+
+async def settle_freezes(session: AsyncSession, user: User) -> int:
+    """Автоматически тратит заморозки на пропущенные дни, чтобы серия не оборвалась.
+
+    Идёт от последнего закрытого дня до вчера. Если пропущено ``g`` дней подряд и заморозок
+    хватает на ВСЕ (иначе серия всё равно оборвётся — зря не тратим), закрывает их
+    отметками ``freeze``. Идемпотентно. Возвращает число потраченных заморозок.
+    """
+    today = local_today(user)
+    closed_map = await closed_days(session, user, today)
+    yesterday = today - timedelta(days=1)
+    past = [d for d in closed_map if d <= yesterday]
+    if not past or (user.streak_freezes or 0) <= 0:
+        return 0
+    last = max(past)
+    gap = (yesterday - last).days
+    if gap <= 0:
+        return 0  # вчера закрыт — пропусков нет
+    frozen = frozenset(d for d, src in closed_map.items() if src == "freeze")
+    if run_ending_at(set(closed_map), last, frozen) < MIN_RUN_FOR_FREEZE:
+        return 0
+    if (user.streak_freezes or 0) < gap:
+        return 0
+    for i in range(1, gap + 1):
+        session.add(DailyActivity(user_id=user.id, local_date=last + timedelta(days=i), source="freeze"))
+    user.streak_freezes = (user.streak_freezes or 0) - gap
+    await session.commit()
+    return gap
 
 
 async def get_streak(session: AsyncSession, user: User) -> StreakInfo:
     """Серия пользователя; рекорд при росте сохраняется в ``users.longest_streak``."""
+    await settle_freezes(session, user)
     today = local_today(user)
     info = compute(await closed_days(session, user, today), today, user.longest_streak or 0)
     if info.longest > (user.longest_streak or 0):

@@ -70,6 +70,22 @@ class XpInfo:
     progress: int        # прогресс внутри уровня, %
 
 
+class FreezeError(Exception):
+    """Покупка заморозки невозможна: ``max_freezes`` | ``not_enough_xp``."""
+
+
+async def buy_freeze(session: AsyncSession, user: User) -> None:
+    """Покупка заморозки серии за XP (G4). Не больше ``MAX_FREEZES``; XP списывается из баланса."""
+    if (user.streak_freezes or 0) >= streak_svc.MAX_FREEZES:
+        raise FreezeError("max_freezes")
+    info = await compute_xp(session, user)
+    if info.balance < streak_svc.FREEZE_COST_XP:
+        raise FreezeError("not_enough_xp")
+    user.xp_spent = (user.xp_spent or 0) + streak_svc.FREEZE_COST_XP
+    user.streak_freezes = (user.streak_freezes or 0) + 1
+    await session.commit()
+
+
 def _is_event(tx_row) -> bool:
     """Платёж / взнос: оплата платежа, возврат долга, пополнение цели, досрочка кредита."""
     source, goal_id, debt_id, debt_role, credit_id = tx_row
@@ -110,7 +126,9 @@ async def compute_xp(session: AsyncSession, user: User) -> XpInfo:
             ops[day] += 1
 
     marks = await session.execute(
-        select(DailyActivity.local_date).where(DailyActivity.user_id == user.id)
+        select(DailyActivity.local_date).where(
+            DailyActivity.user_id == user.id, DailyActivity.source != "freeze"
+        )
     )
     closed.update(d for (d,) in marks.all())
 

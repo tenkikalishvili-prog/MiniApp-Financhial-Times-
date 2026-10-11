@@ -202,8 +202,22 @@ async def _send_streak_warning(bot: Bot, session, user: User) -> None:
 
 async def _send_streak_break_notice(bot: Bot, session, user: User) -> None:
     """Утром после обрыва: один раз сообщаем и предлагаем начать заново."""
+    # Сначала пробуем спасти серию заморозкой (если пропущены дни и их хватает).
+    await streak_svc.settle_freezes(session, user)
     today = streak_svc.local_today(user)
     if user.streak_notice_date == today:
+        return
+    info = await streak_svc.get_streak(session, user)
+    if info.frozen_yesterday:
+        user.streak_notice_date = today
+        await session.commit()
+        await _safe_send(
+            bot,
+            user.telegram_id,
+            f"🧊 Вчера заморозка сохранила твою серию — {_days(info.current)}. "
+            "Внеси операцию сегодня, чтобы идти дальше!",
+            "Серия-заморозка",
+        )
         return
     broken = streak_svc.broken_run_length(await streak_svc.closed_days(session, user, today), today)
     if broken >= 2:
