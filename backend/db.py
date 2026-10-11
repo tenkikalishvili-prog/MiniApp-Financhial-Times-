@@ -55,6 +55,7 @@ async def init_db() -> None:
         await conn.run_sync(_ensure_user_columns)
         await conn.run_sync(_ensure_ledger_columns)
         await conn.run_sync(_ensure_planner_columns)
+        await conn.run_sync(_ensure_credit_columns)
         await conn.run_sync(_backfill_ledger)
 
 
@@ -115,6 +116,29 @@ def _ensure_planner_columns(conn) -> None:
         },
         "bills": {"segment_override": "INTEGER"},
         "debts": {"segment_override": "INTEGER"},
+    }
+    for table, cols in additions.items():
+        existing = {col["name"] for col in inspect(conn).get_columns(table)}
+        for name, sql_type in cols.items():
+            if name in existing:
+                continue
+            conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {guard}{name} {sql_type}"))
+
+
+def _ensure_credit_columns(conn) -> None:
+    """Идемпотентно готовит БД под «Кредиты»: ``transactions.credit_id`` и ``users.credit_fund``.
+
+    Сама таблица ``credits`` создаётся ``create_all``. Работает и на SQLite, и на Postgres
+    (``IF NOT EXISTS`` — чтобы параллельный старт бота и API не падал).
+    """
+    from sqlalchemy import inspect, text
+
+    is_pg = conn.dialect.name == "postgresql"
+    guard = "IF NOT EXISTS " if is_pg else ""
+
+    additions = {
+        "transactions": {"credit_id": "INTEGER"},
+        "users": {"credit_fund": "NUMERIC(12, 2) DEFAULT 0"},
     }
     for table, cols in additions.items():
         existing = {col["name"] for col in inspect(conn).get_columns(table)}

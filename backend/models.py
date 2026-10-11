@@ -60,6 +60,10 @@ class User(Base):
     # Напоминания о платежах и долгах (S11): шлются раз в день в утренний час.
     reminders_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
 
+    # Фонд досрочного погашения кредитов, ₽ в месяц (экран «Кредиты»). Рекомендуемая сумма,
+    # которую человек готов направлять на досрочку; на расчёты не влияет — это ориентир.
+    credit_fund: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+
     categories: Mapped[list[Category]] = relationship(back_populates="user")
     transactions: Mapped[list[Transaction]] = relationship(back_populates="user")
 
@@ -143,6 +147,11 @@ class Transaction(Base):
     debt_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("debts.id"), index=True, nullable=True
     )
+    # Досрочное погашение кредита: обычный РАСХОД с категорией «Досрочное погашение кредитов»
+    # (article='expense'), плюс ссылка на кредит. Считается в «Расходах»/«Свободно» ровно один раз.
+    credit_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("credits.id"), index=True, nullable=True
+    )
     # Для операций по долгу: principal (тело — занял/дал) | payment (возврат/платёж).
     debt_role: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     # Направление ДС для операций по целям/долгам: in (приток) | out (отток). NULL у доход/расход.
@@ -152,6 +161,32 @@ class Transaction(Base):
     category: Mapped[Optional[Category]] = relationship()
     goal: Mapped[Optional["Goal"]] = relationship()
     debt: Mapped[Optional["Debt"]] = relationship()
+    credit: Mapped[Optional["Credit"]] = relationship()
+
+
+class Credit(Base):
+    """Банковский кредит / кредитка пользователя (экран «Кредиты»).
+
+    ``amount`` — тело кредита. Досрочные погашения — операции реестра (``Transaction`` с
+    ``credit_id``, расход с категорией «Досрочное погашение кредитов»); ``paid`` — кэш их суммы
+    (как ``Goal.saved``). Кредит «закрыт», когда ``paid >= amount`` (галочкой или суммой взносов).
+    ``monthly_payment`` — обычный ежемесячный платёж: когда кредит закрыт, он «высвобождается».
+    """
+
+    __tablename__ = "credits"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    kind: Mapped[str] = mapped_column(String(8), default="credit")  # credit | card
+    bank: Mapped[str] = mapped_column(String(128))
+    amount: Mapped[Decimal] = mapped_column(Numeric(12, 2))  # тело кредита
+    paid: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)  # погашено досрочно
+    monthly_payment: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=0)
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    is_closed: Mapped[bool] = mapped_column(Boolean, default=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+    user: Mapped[User] = relationship()
 
 
 class Debt(Base):

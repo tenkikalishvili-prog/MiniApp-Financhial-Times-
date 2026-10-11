@@ -10,7 +10,8 @@ from fastapi import APIRouter, HTTPException, Query, status
 from sqlalchemy import delete, select
 
 from backend.models import Bill, BillMark, Budget, Category, Debt, Transaction
-from backend.models import Goal, User
+from backend.models import Credit, Goal, User
+from backend.services import credits as credits_svc
 from backend.services import bills as bills_svc
 from backend.services import cashflow as cashflow_svc
 from backend.services import categories as categories_svc
@@ -42,6 +43,13 @@ from .schemas import (
     CategoryGroupOut,
     CategoryRename,
     CreatedSubcategoryOut,
+    CreditCreate,
+    CreditFundUpdate,
+    CreditOut,
+    CreditRepaymentCreate,
+    CreditRepaymentOut,
+    CreditsOut,
+    CreditUpdate,
     DebtCreate,
     DebtOut,
     DebtPaymentCreate,
@@ -698,6 +706,10 @@ async def update_transaction(
         raise HTTPException(
             status.HTTP_400_BAD_REQUEST, "edit goal/debt operations on their card"
         )
+    if tx.credit_id is not None and body.category_id is not None:
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST, "early-repayment category cannot be changed"
+        )
 
     category = await session.get(Category, tx.category_id) if tx.category_id else None
     if body.category_id is not None and body.category_id != tx.category_id:
@@ -714,6 +726,11 @@ async def update_transaction(
     if body.comment is not None:
         tx.description = body.comment.strip() or None
 
+    if tx.credit_id is not None:
+        # Сумма досрочки изменилась — пересчитываем факт по кредиту.
+        credit = await session.get(Credit, tx.credit_id)
+        await session.flush()
+        await credits_svc.recalc_paid(session, credit)
     await session.commit()
     tx.category = category
     return _tx_out(tx)
@@ -742,6 +759,11 @@ async def delete_transaction(
             )
         debt = await session.get(Debt, tx.debt_id)
         await debts_svc.delete_payment(session, tx, debt)
+        return
+
+    if tx.credit_id is not None:
+        credit = await session.get(Credit, tx.credit_id)
+        await credits_svc.delete_repayment(session, tx, credit)
         return
 
     await session.delete(tx)
@@ -1070,6 +1092,166 @@ async def delete_goal_contribution(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "contribution not found")
     await goals_svc.delete_contribution(session, item, goal)
     return _goal_out(goal)
+
+
+# ── Кредиты и досрочное погашение ────────────────────────────────────────
+def _credit_out(c: Credit) -> CreditOut:
+    amount = float(c.amount)
+    paid = float(c.paid)
+    return CreditOut(
+        id=c.id,
+        kind=c.kind,
+        bank=c.bank,
+        amount=amount,
+        paid=paid,
+        remaining=round(max(0.0, amount - paid), 2),
+        monthly_payment=float(c.monthly_payment),
+        note=c.note,
+        is_closed=c.is_closed,
+    )
+
+
+async def _credits_payload(session, user) -> CreditsOut:
+    items = await credits_svc.list_credits(session, user.id)
+    s = credits_svc.summarize(items)
+    return CreditsOut(
+        fund=float(user.credit_fund or 0),
+        total_debt=float(s.total_debt),
+        freed_payments=float(s.freed_payments),
+        paid_total=float(s.paid_total),
+        items=[_credit_out(c) for c in items],
+    )
+
+
+async def _get_owned_credit(session, user, credit_id: int) -> Credit:
+    credit = await session.get(Credit, credit_id)
+    if credit is None or credit.user_id != user.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "credit not found")
+    return credit
+
+
+def _norm_kind(kind: str) -> str:
+    if kind not in ("credit", "card"):
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "kind must be credit or card")
+    return kind
+
+
+@router.get("/credits", response_model=CreditsOut)
+async def list_credits(user: CurrentUser, session: SessionDep) -> CreditsOut:
+    """Экран «Кредиты»: фонд + сводка + все кредиты (закрытые тоже — для «Высвободившихся»)."""
+    return await _credits_payload(session, user)
+
+
+@router.patch("/credits/fund", response_model=CreditsOut)
+async def set_credit_fund(
+    body: CreditFundUpdate, user: CurrentUser, session: SessionDep
+) -> CreditsOut:
+    user.credit_fund = Decimal(str(body.fund))
+    await session.commit()
+    return await _credits_payload(session, user)
+
+
+@router.post("/credits", response_model=CreditOut, status_code=201)
+async def create_credit(
+    body: CreditCreate, user: CurrentUser, session: SessionDep
+) -> CreditOut:
+    bank = body.bank.strip()
+    if not bank:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "bank is required")
+    credit = await credits_svc.create_credit(
+        session,
+        user_id=user.id,
+        kind=_norm_kind(body.kind),
+        bank=bank,
+        amount=Decimal(str(body.amount)),
+        monthly_payment=Decimal(str(body.monthly_payment)),
+        note=(body.note or "").strip() or None,
+    )
+    return _credit_out(credit)
+
+
+@router.patch("/credits/{credit_id}", response_model=CreditOut)
+async def update_credit(
+    credit_id: int, body: CreditUpdate, user: CurrentUser, session: SessionDep
+) -> CreditOut:
+    credit = await _get_owned_credit(session, user, credit_id)
+    if body.kind is not None:
+        credit.kind = _norm_kind(body.kind)
+    if body.bank is not None:
+        bank = body.bank.strip()
+        if not bank:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "bank is required")
+        credit.bank = bank
+    if body.amount is not None:
+        credit.amount = Decimal(str(body.amount))
+    if body.monthly_payment is not None:
+        credit.monthly_payment = Decimal(str(body.monthly_payment))
+    if body.note is not None:
+        credit.note = body.note.strip() or None
+    await session.flush()
+    await credits_svc.recalc_paid(session, credit)  # тело могло измениться → статус закрытия
+    await session.commit()
+    return _credit_out(credit)
+
+
+@router.delete("/credits/{credit_id}", status_code=204)
+async def delete_credit(credit_id: int, user: CurrentUser, session: SessionDep) -> None:
+    credit = await _get_owned_credit(session, user, credit_id)
+    await credits_svc.delete_credit(session, credit)
+
+
+@router.get("/credits/{credit_id}/repayments", response_model=list[CreditRepaymentOut])
+async def list_credit_repayments(
+    credit_id: int, user: CurrentUser, session: SessionDep
+) -> list[CreditRepaymentOut]:
+    await _get_owned_credit(session, user, credit_id)
+    items = await credits_svc.list_repayments(session, credit_id)
+    return [CreditRepaymentOut(id=t.id, amount=float(t.amount), on_date=t.date) for t in items]
+
+
+@router.post("/credits/{credit_id}/repayments", response_model=CreditOut, status_code=201)
+async def add_credit_repayment(
+    credit_id: int, body: CreditRepaymentCreate, user: CurrentUser, session: SessionDep
+) -> CreditOut:
+    """Внести часть тела (досрочка). Не больше остатка."""
+    credit = await _get_owned_credit(session, user, credit_id)
+    left = round(float(credits_svc.remaining(credit)), 2)
+    if round(body.amount, 2) > left:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, "amount exceeds remaining")
+    await credits_svc.add_repayment(
+        session, credit, Decimal(str(body.amount)), body.on_date or date.today()
+    )
+    return _credit_out(credit)
+
+
+@router.post("/credits/{credit_id}/close", response_model=CreditOut)
+async def close_credit(credit_id: int, user: CurrentUser, session: SessionDep) -> CreditOut:
+    """Галочка «погашен полностью»: вносит остаток тела одной операцией (идемпотентно)."""
+    credit = await _get_owned_credit(session, user, credit_id)
+    left = credits_svc.remaining(credit)
+    if left > 0:
+        await credits_svc.add_repayment(session, credit, left, date.today())
+    return _credit_out(credit)
+
+
+@router.post("/credits/{credit_id}/reopen", response_model=CreditOut)
+async def reopen_credit(credit_id: int, user: CurrentUser, session: SessionDep) -> CreditOut:
+    """Снятие галочки: сбрасывает факт (удаляет все погашения кредита)."""
+    credit = await _get_owned_credit(session, user, credit_id)
+    await credits_svc.reset_repayments(session, credit)
+    return _credit_out(credit)
+
+
+@router.delete("/credits/{credit_id}/repayments/{repayment_id}", response_model=CreditOut)
+async def delete_credit_repayment(
+    credit_id: int, repayment_id: int, user: CurrentUser, session: SessionDep
+) -> CreditOut:
+    credit = await _get_owned_credit(session, user, credit_id)
+    item = await session.get(Transaction, repayment_id)
+    if item is None or item.credit_id != credit.id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "repayment not found")
+    await credits_svc.delete_repayment(session, item, credit)
+    return _credit_out(credit)
 
 
 # ── Обязательные платежи (направление C, S10) ────────────────────────────

@@ -477,3 +477,55 @@ class CashflowPlanOut(CamelModel):
     boundary_day: int = Field(serialization_alias="boundaryDay")  # всегда 15
     segments: list[CashflowSegmentOut]
     overdue: list[CashflowItemOut] = []  # просрочка прошлых месяцев — отдельным блоком
+
+
+# ── Кредиты и досрочное погашение ────────────────────────────────────────
+class CreditOut(CamelModel):
+    id: int
+    kind: str                         # credit | card
+    bank: str
+    amount: float                     # тело кредита
+    paid: float                       # факт досрочки
+    remaining: float                  # остаток = amount − paid
+    monthly_payment: float = Field(serialization_alias="monthlyPayment")
+    note: Optional[str] = None
+    is_closed: bool = Field(serialization_alias="isClosed")
+
+
+class CreditsOut(CamelModel):
+    fund: float                       # фонд досрочного погашения (рекомендуемая сумма)
+    total_debt: float = Field(serialization_alias="totalDebt")
+    freed_payments: float = Field(serialization_alias="freedPayments")
+    paid_total: float = Field(serialization_alias="paidTotal")
+    items: list[CreditOut]
+
+
+class CreditCreate(CamelModel):
+    kind: str = "credit"
+    bank: str
+    amount: float = Field(gt=0)
+    monthly_payment: float = Field(default=0, ge=0, validation_alias="monthlyPayment")
+    note: Optional[str] = None
+
+
+class CreditUpdate(CamelModel):
+    kind: Optional[str] = None
+    bank: Optional[str] = None
+    amount: Optional[float] = Field(default=None, gt=0)
+    monthly_payment: Optional[float] = Field(default=None, ge=0, validation_alias="monthlyPayment")
+    note: Optional[str] = None
+
+
+class CreditFundUpdate(CamelModel):
+    fund: float = Field(ge=0)
+
+
+class CreditRepaymentOut(CamelModel):
+    id: int
+    amount: float
+    on_date: date = Field(serialization_alias="date")
+
+
+class CreditRepaymentCreate(CamelModel):
+    amount: float = Field(gt=0)
+    on_date: Optional[date] = Field(default=None, validation_alias="date")
