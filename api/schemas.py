@@ -497,6 +497,8 @@ class CreditsOut(CamelModel):
     total_debt: float = Field(serialization_alias="totalDebt")
     freed_payments: float = Field(serialization_alias="freedPayments")
     paid_total: float = Field(serialization_alias="paidTotal")
+    # Досрочка, внесённая в выбранном месяце (для блока «Досрочное погашение» на «Платежах»).
+    month_paid: float = Field(serialization_alias="monthPaid")
     items: list[CreditOut]
 
 

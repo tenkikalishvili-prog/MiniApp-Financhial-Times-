@@ -1111,14 +1111,17 @@ def _credit_out(c: Credit) -> CreditOut:
     )
 
 
-async def _credits_payload(session, user) -> CreditsOut:
+async def _credits_payload(session, user, month: Optional[str] = None) -> CreditsOut:
     items = await credits_svc.list_credits(session, user.id)
     s = credits_svc.summarize(items)
+    year, mon, _ = _parse_month(month)
+    month_paid = await credits_svc.month_paid_total(session, user.id, year, mon)
     return CreditsOut(
         fund=float(user.credit_fund or 0),
         total_debt=float(s.total_debt),
         freed_payments=float(s.freed_payments),
         paid_total=float(s.paid_total),
+        month_paid=float(month_paid),
         items=[_credit_out(c) for c in items],
     )
 
@@ -1137,9 +1140,13 @@ def _norm_kind(kind: str) -> str:
 
 
 @router.get("/credits", response_model=CreditsOut)
-async def list_credits(user: CurrentUser, session: SessionDep) -> CreditsOut:
+async def list_credits(
+    user: CurrentUser,
+    session: SessionDep,
+    month: Optional[str] = Query(default=None),
+) -> CreditsOut:
     """Экран «Кредиты»: фонд + сводка + все кредиты (закрытые тоже — для «Высвободившихся»)."""
-    return await _credits_payload(session, user)
+    return await _credits_payload(session, user, month)
 
 
 @router.patch("/credits/fund", response_model=CreditsOut)

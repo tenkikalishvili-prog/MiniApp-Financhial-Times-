@@ -170,6 +170,23 @@ class CreditsSummary:
     paid_total: Decimal       # факт досрочки по всем кредитам
 
 
+async def month_paid_total(
+    session: AsyncSession, user_id: int, year: int, month: int
+) -> Decimal:
+    """Сумма досрочных погашений (по всем кредитам) за календарный месяц."""
+    start = date(year, month, 1)
+    end = date(year + 1, 1, 1) if month == 12 else date(year, month + 1, 1)
+    total = await session.scalar(
+        select(func.coalesce(func.sum(Transaction.amount), 0)).where(
+            Transaction.user_id == user_id,
+            Transaction.credit_id.is_not(None),
+            Transaction.date >= start,
+            Transaction.date < end,
+        )
+    )
+    return Decimal(str(total or 0))
+
+
 def summarize(credits: list[Credit]) -> CreditsSummary:
     return CreditsSummary(
         total_debt=sum((remaining(c) for c in credits), Decimal("0")),
