@@ -558,3 +558,16 @@ class DayRingOut(CamelModel):
     days_closed: int = Field(serialization_alias="daysClosed")
     days_within: int = Field(serialization_alias="daysWithin")
     week: list[WeekDayOut]
+
+
+# ── Геймификация: XP и уровень (G3) ──────────────────────────────────────
+class XpOut(CamelModel):
+    xp: int                              # заработано всего
+    spent: int                           # потрачено (заморозки)
+    balance: int                         # доступно
+    today: int                           # заработано сегодня
+    level: int
+    level_name: str = Field(serialization_alias="levelName")
+    level_start: int = Field(serialization_alias="levelStart")
+    next_at: int = Field(serialization_alias="nextAt")
+    progress: int                        # % внутри уровня

@@ -14,6 +14,7 @@ from backend.models import Credit, Goal, User
 from backend.services import credits as credits_svc
 from backend.services import dayring as dayring_svc
 from backend.services import streak as streak_svc
+from backend.services import xp as xp_svc
 from backend.services import bills as bills_svc
 from backend.services import cashflow as cashflow_svc
 from backend.services import categories as categories_svc
@@ -54,6 +55,7 @@ from .schemas import (
     CreditUpdate,
     DayRingOut,
     WeekDayOut,
+    XpOut,
     DebtCreate,
     DebtOut,
     DebtPaymentCreate,
@@ -259,6 +261,23 @@ async def get_streak(user: CurrentUser, session: SessionDep) -> StreakOut:
 async def close_day(user: CurrentUser, session: SessionDep) -> StreakOut:
     """«Трат не было»: закрывает сегодняшний день без операции (идемпотентно)."""
     return _streak_out(await streak_svc.close_day_manual(session, user))
+
+
+@router.get("/xp", response_model=XpOut)
+async def get_xp(user: CurrentUser, session: SessionDep) -> XpOut:
+    """XP и уровень (G3): считаются из истории с дневными капами."""
+    x = await xp_svc.compute_xp(session, user)
+    return XpOut(
+        xp=x.earned,
+        spent=x.spent,
+        balance=x.balance,
+        today=x.today,
+        level=x.level,
+        level_name=x.level_name,
+        level_start=x.level_start,
+        next_at=x.next_at,
+        progress=x.progress,
+    )
 
 
 @router.get("/day-ring", response_model=DayRingOut)
